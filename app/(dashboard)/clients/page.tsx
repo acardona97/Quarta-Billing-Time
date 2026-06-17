@@ -20,7 +20,7 @@ import { startOfMonthBogota, todayBogota } from "@/lib/utils/date"
 import { toast } from "sonner"
 import {
   Plus, Building2, FolderOpen, Clock, Search, Check, X, Trash2,
-  DollarSign, Hourglass, Send, Receipt, AlertTriangle, ChevronRight, Pencil,
+  DollarSign, Send, Receipt, AlertTriangle, Pencil,
 } from "lucide-react"
 import type { Client, Matter, BillingType } from "@/lib/types"
 import { BILLING_TYPE_SHORT } from "@/lib/types"
@@ -199,7 +199,7 @@ export default function ClientsPage() {
       <div className="w-80 shrink-0 flex flex-col glass-panel rounded-3xl overflow-hidden">
         <div className="p-5 pb-3">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-foreground">Clients</h2>
+            <h2 className="text-lg font-semibold text-foreground">Clientes</h2>
             <Dialog open={newClientOpen} onOpenChange={setNewClientOpen}>
               <DialogTrigger
                 render={
@@ -275,11 +275,11 @@ export default function ClientsPage() {
                       {hasFee && capPct >= 80 ? (
                         <Badge className="text-[9px] px-1.5 py-0 bg-amber-500/20 text-amber-300 border border-amber-500/30 gap-0.5">
                           <AlertTriangle className="h-2.5 w-2.5" />
-                          Budget Alert
+                          Cap alto
                         </Badge>
                       ) : (
                         <Badge className="text-[9px] px-1.5 py-0 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                          Active
+                          Activo
                         </Badge>
                       )}
                     </div>
@@ -305,7 +305,7 @@ export default function ClientsPage() {
                 <h2 className="text-lg font-semibold">
                   {selectedClient.name}
                   <span className="text-muted-foreground font-normal text-sm ml-2">
-                    Matters & Timeline
+                    Asuntos
                   </span>
                 </h2>
                 <Button
@@ -461,7 +461,7 @@ export default function ClientsPage() {
 
             {/* Quick Log */}
             <div className="pt-2 border-t border-white/5">
-              <h4 className="text-sm font-semibold mb-3">Quick Log</h4>
+              <h4 className="text-sm font-semibold mb-3">Registro Rápido</h4>
               <QuickLogForm client={selectedClient} />
             </div>
           </div>
@@ -469,8 +469,8 @@ export default function ClientsPage() {
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="text-center">
               <Clock className="h-10 w-10 mx-auto mb-2 opacity-20" />
-              <p className="text-xs">Métricas y quick log</p>
-              <p className="text-[10px] mt-1 opacity-50">aparecerán al seleccionar un cliente</p>
+              <p className="text-xs">Conteo de horas</p>
+              <p className="text-[10px] mt-1 opacity-50">Selecciona un cliente para ver el detalle</p>
             </div>
           </div>
         )}
@@ -483,50 +483,6 @@ export default function ClientsPage() {
           clientName={selectedClient.name}
           onClose={() => setInvoiceMatter(null)}
         />
-      )}
-    </div>
-  )
-}
-
-// ─── METRIC ROW ─────────────────────────────────────────
-
-function MetricRow({
-  label,
-  value,
-  type,
-  consumed,
-  cap,
-}: {
-  label: string
-  value: string
-  type: string
-  consumed: number
-  cap: number
-}) {
-  const colors = BILLING_COLORS[type] || BILLING_COLORS.hourly
-  const pct = cap > 0 ? Math.round((consumed / cap) * 100) : 0
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <p className="text-sm text-muted-foreground">{label}</p>
-        <p className="text-lg font-semibold tabular-nums">{value}</p>
-      </div>
-      {cap > 0 && (
-        <>
-          <div className="flex justify-between text-[10px] text-muted-foreground mb-1">
-            <span>Consumed/tase</span>
-            <span>{pct}%</span>
-          </div>
-          <div className="h-2 bg-white/5 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all ${
-                pct >= 100 ? "bg-red-400" : pct >= 80 ? "bg-amber-400" : colors.bar
-              }`}
-              style={{ width: `${Math.min(pct, 100)}%` }}
-            />
-          </div>
-        </>
       )}
     </div>
   )
@@ -746,7 +702,7 @@ function EditableMatterCard({
         {bt === "fee" && matter.hour_cap != null && matter.hour_cap > 0 && (
           <div className="mt-3 space-y-1">
             <div className="flex justify-between text-[10px] text-muted-foreground">
-              <span>Budget Used</span>
+              <span>Cap consumido</span>
               <span>{Math.round((matter.consumedMinutes / matter.hour_cap) * 100)}%</span>
             </div>
             <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
@@ -798,7 +754,7 @@ function QuickLogForm({ client }: { client: ClientWithData }) {
       matter_id: matterId,
       entry_date: todayBogota(),
       duration_minutes: mins,
-      description: `Quick log — ${matter?.name || ""}`,
+      description: `Registro rápido — ${matter?.name || ""}`,
       is_billable: true,
       source: "manual",
       billing_status: "draft",
@@ -818,11 +774,11 @@ function QuickLogForm({ client }: { client: ClientWithData }) {
   return (
     <div className="space-y-3">
       <div>
-        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Client</Label>
+        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Cliente</Label>
         <div className="glass-panel rounded-xl px-3 py-2 text-sm">{client.name}</div>
       </div>
       <div>
-        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Matter</Label>
+        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Asunto</Label>
         <Select value={matterId} onValueChange={(v) => setMatterId(v ?? "")}>
           <SelectTrigger className="rounded-xl bg-white/5 border-white/10 h-9 text-sm">
             <SelectValue />
@@ -835,7 +791,7 @@ function QuickLogForm({ client }: { client: ClientWithData }) {
         </Select>
       </div>
       <div>
-        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Time</Label>
+        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Tiempo</Label>
         <div className="flex items-center gap-2 glass-panel rounded-xl px-3 py-2">
           <Clock className="h-4 w-4 text-muted-foreground" />
           <Input
@@ -850,7 +806,7 @@ function QuickLogForm({ client }: { client: ClientWithData }) {
         disabled={saving}
         className="w-full rounded-xl bg-primary hover:bg-primary/90 cursor-pointer"
       >
-        {saving ? "Registrando..." : "Log Time"}
+        {saving ? "Registrando..." : "Registrar Horas"}
       </Button>
     </div>
   )
