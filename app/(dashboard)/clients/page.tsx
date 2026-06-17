@@ -20,7 +20,7 @@ import { startOfMonthBogota, todayBogota } from "@/lib/utils/date"
 import { toast } from "sonner"
 import {
   Plus, Building2, FolderOpen, Clock, Search, Check, X, Trash2,
-  DollarSign, Hourglass, Send, Receipt, AlertTriangle, ChevronRight,
+  DollarSign, Hourglass, Send, Receipt, AlertTriangle, ChevronRight, Pencil,
 } from "lucide-react"
 import type { Client, Matter, BillingType } from "@/lib/types"
 import { BILLING_TYPE_SHORT } from "@/lib/types"
@@ -328,79 +328,15 @@ export default function ClientsPage() {
                 <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-primary/40 via-primary/20 to-transparent" />
 
                 <div className="space-y-4 pl-10">
-                  {selectedClient.matters.map((matter) => {
-                    const bt = matter.billing_type || "hourly"
-                    const colors = BILLING_COLORS[bt] || BILLING_COLORS.hourly
-
-                    return (
-                      <div key={matter.id} className="relative group">
-                        {/* Timeline dot */}
-                        <div className={`absolute -left-[34px] top-4 w-3 h-3 rounded-full border-2 border-background ${
-                          matter.consumedMinutes > 0 ? "bg-primary glow-blue-sm" : "bg-muted-foreground/30"
-                        }`} />
-
-                        {/* Matter card */}
-                        <div className="glass-panel glass-panel-hover rounded-2xl p-4 transition-all">
-                          <div className="flex items-start justify-between mb-2">
-                            <div>
-                              <p className="font-medium text-sm">{matter.name}</p>
-                              {matter.description && (
-                                <p className="text-[11px] text-muted-foreground mt-0.5">{matter.description}</p>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <Badge className={`text-[9px] px-1.5 py-0 border ${colors.badge}`}>
-                                {BILLING_TYPE_SHORT[bt as BillingType] || "Horas"}
-                              </Badge>
-                              {!matter.is_default && (
-                                <button
-                                  onClick={() => setInvoiceMatter(matter)}
-                                  className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
-                                  title="Facturar"
-                                >
-                                  <Receipt className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Time entry display */}
-                          {matter.consumedMinutes > 0 && (
-                            <div className="flex items-center gap-2 mt-2">
-                              <div className={`px-2.5 py-1 rounded-lg text-xs font-medium ${colors.badge}`}>
-                                {formatDuration(matter.consumedMinutes)}
-                              </div>
-                              {bt === "hourly" && matter.hourly_rate != null && (
-                                <span className="text-[10px] text-muted-foreground">
-                                  × ${new Intl.NumberFormat("es-CO").format(matter.hourly_rate)}/h
-                                </span>
-                              )}
-                            </div>
-                          )}
-
-                          {/* Fee cap progress */}
-                          {bt === "fee" && matter.hour_cap != null && matter.hour_cap > 0 && (
-                            <div className="mt-3 space-y-1">
-                              <div className="flex justify-between text-[10px] text-muted-foreground">
-                                <span>Budget Used</span>
-                                <span>{Math.round((matter.consumedMinutes / matter.hour_cap) * 100)}%</span>
-                              </div>
-                              <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full transition-all ${
-                                    matter.consumedMinutes / matter.hour_cap >= 1 ? "bg-red-400" :
-                                    matter.consumedMinutes / matter.hour_cap >= 0.8 ? "bg-amber-400" :
-                                    colors.bar
-                                  }`}
-                                  style={{ width: `${Math.min((matter.consumedMinutes / matter.hour_cap) * 100, 100)}%` }}
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })}
+                  {selectedClient.matters.map((matter) => (
+                    <EditableMatterCard
+                      key={matter.id}
+                      matter={matter}
+                      clientId={selectedClient.id}
+                      onInvoice={() => setInvoiceMatter(matter)}
+                      onRefresh={loadClients}
+                    />
+                  ))}
                 </div>
               </div>
 
@@ -534,6 +470,240 @@ function MetricRow({
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+// ─── EDITABLE MATTER CARD ────────────────────────────────
+
+function EditableMatterCard({
+  matter,
+  clientId,
+  onInvoice,
+  onRefresh,
+}: {
+  matter: MatterWithHours
+  clientId: string
+  onInvoice: () => void
+  onRefresh: () => void
+}) {
+  const supabase = createClient()
+  const [editing, setEditing] = useState(false)
+  const [editName, setEditName] = useState(matter.name)
+  const [editDesc, setEditDesc] = useState(matter.description || "")
+  const [editHours, setEditHours] = useState("")
+  const [editCap, setEditCap] = useState(matter.hour_cap ? (matter.hour_cap / 60).toString() : "")
+  const [editRate, setEditRate] = useState(matter.hourly_rate?.toString() || "")
+  const [saving, setSaving] = useState(false)
+
+  const bt = matter.billing_type || "hourly"
+  const colors = BILLING_COLORS[bt] || BILLING_COLORS.hourly
+
+  function startEdit() {
+    setEditName(matter.name)
+    setEditDesc(matter.description || "")
+    setEditHours((matter.consumedMinutes / 60).toFixed(2))
+    setEditCap(matter.hour_cap ? (matter.hour_cap / 60).toString() : "")
+    setEditRate(matter.hourly_rate?.toString() || "")
+    setEditing(true)
+  }
+
+  async function handleSave() {
+    setSaving(true)
+
+    const updates: Record<string, unknown> = {
+      name: editName.trim() || matter.name,
+      description: editDesc.trim() || null,
+    }
+
+    if (bt === "fee" && editCap) updates.hour_cap = Math.round(parseFloat(editCap) * 60)
+    if (bt === "hourly" && editRate) updates.hourly_rate = parseFloat(editRate)
+
+    const { error } = await supabase
+      .from("matters")
+      .update(updates)
+      .eq("id", matter.id)
+
+    if (error) {
+      toast.error("Error: " + error.message)
+      setSaving(false)
+      return
+    }
+
+    // Update hours if changed
+    const newMinutes = Math.round(parseFloat(editHours || "0") * 60)
+    const diff = newMinutes - matter.consumedMinutes
+
+    if (diff !== 0) {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        if (diff > 0) {
+          await supabase.from("time_entries").insert({
+            user_id: user.id,
+            client_id: clientId,
+            matter_id: matter.id,
+            entry_date: todayBogota(),
+            duration_minutes: diff,
+            description: `Ajuste de horas — ${editName}`,
+            is_billable: true,
+            source: "manual",
+            billing_status: "draft",
+            created_by: user.id,
+            applied_rate: bt === "hourly" && editRate ? parseFloat(editRate) : null,
+          })
+        } else {
+          await supabase.from("time_entries").insert({
+            user_id: user.id,
+            client_id: clientId,
+            matter_id: matter.id,
+            entry_date: todayBogota(),
+            duration_minutes: diff,
+            description: `Corrección de horas — ${editName}`,
+            is_billable: true,
+            source: "manual",
+            billing_status: "draft",
+            created_by: user.id,
+            applied_rate: bt === "hourly" && editRate ? parseFloat(editRate) : null,
+          })
+        }
+        window.dispatchEvent(new CustomEvent("time-entry-created"))
+      }
+    }
+
+    toast.success("Asunto actualizado")
+    setEditing(false)
+    setSaving(false)
+    onRefresh()
+  }
+
+  if (editing) {
+    return (
+      <div className="relative">
+        <div className={`absolute -left-[34px] top-4 w-3 h-3 rounded-full border-2 border-background bg-primary glow-blue-sm`} />
+        <div className="glass-panel rounded-2xl p-4 border border-primary/30 space-y-3">
+          <p className="text-xs font-semibold text-primary">Editando asunto</p>
+          <Input
+            value={editName}
+            onChange={(e) => setEditName(e.target.value)}
+            placeholder="Nombre del asunto"
+            className="rounded-xl bg-white/5 border-white/10 h-8 text-xs"
+            autoFocus
+          />
+          <Input
+            value={editDesc}
+            onChange={(e) => setEditDesc(e.target.value)}
+            placeholder="Descripción (opcional)"
+            className="rounded-xl bg-white/5 border-white/10 h-8 text-xs"
+          />
+          <div>
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Horas registradas este mes
+            </Label>
+            <Input
+              type="number"
+              step="0.25"
+              value={editHours}
+              onChange={(e) => setEditHours(e.target.value)}
+              className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1"
+            />
+            <p className="text-[9px] text-muted-foreground mt-0.5">
+              Actual: {(matter.consumedMinutes / 60).toFixed(2)}h — cambia para ajustar
+            </p>
+          </div>
+          {bt === "fee" && (
+            <div>
+              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Cap (horas)</Label>
+              <Input type="number" value={editCap} onChange={(e) => setEditCap(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
+            </div>
+          )}
+          {bt === "hourly" && (
+            <div>
+              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Valor hora COP</Label>
+              <Input type="number" value={editRate} onChange={(e) => setEditRate(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button size="sm" onClick={handleSave} disabled={saving} className="flex-1 rounded-xl text-xs h-8 cursor-pointer">
+              <Check className="h-3 w-3 mr-1" />{saving ? "Guardando..." : "Guardar"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(false)} className="rounded-xl text-xs h-8 cursor-pointer">
+              <X className="h-3 w-3" />
+            </Button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="relative group">
+      <div className={`absolute -left-[34px] top-4 w-3 h-3 rounded-full border-2 border-background ${
+        matter.consumedMinutes > 0 ? "bg-primary glow-blue-sm" : "bg-muted-foreground/30"
+      }`} />
+
+      <div className="glass-panel glass-panel-hover rounded-2xl p-4 transition-all">
+        <div className="flex items-start justify-between mb-2">
+          <div>
+            <p className="font-medium text-sm">{matter.name}</p>
+            {matter.description && (
+              <p className="text-[11px] text-muted-foreground mt-0.5">{matter.description}</p>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Badge className={`text-[9px] px-1.5 py-0 border ${colors.badge}`}>
+              {BILLING_TYPE_SHORT[bt as BillingType] || "Horas"}
+            </Badge>
+            <button
+              onClick={startEdit}
+              className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+              title="Editar asunto"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            {!matter.is_default && (
+              <button
+                onClick={onInvoice}
+                className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
+                title="Facturar"
+              >
+                <Receipt className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {matter.consumedMinutes > 0 && (
+          <div className="flex items-center gap-2 mt-2">
+            <div className={`px-2.5 py-1 rounded-lg text-xs font-medium ${colors.badge}`}>
+              {formatDuration(matter.consumedMinutes)}
+            </div>
+            {bt === "hourly" && matter.hourly_rate != null && (
+              <span className="text-[10px] text-muted-foreground">
+                × ${new Intl.NumberFormat("es-CO").format(matter.hourly_rate)}/h
+              </span>
+            )}
+          </div>
+        )}
+
+        {bt === "fee" && matter.hour_cap != null && matter.hour_cap > 0 && (
+          <div className="mt-3 space-y-1">
+            <div className="flex justify-between text-[10px] text-muted-foreground">
+              <span>Budget Used</span>
+              <span>{Math.round((matter.consumedMinutes / matter.hour_cap) * 100)}%</span>
+            </div>
+            <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  matter.consumedMinutes / matter.hour_cap >= 1 ? "bg-red-400" :
+                  matter.consumedMinutes / matter.hour_cap >= 0.8 ? "bg-amber-400" :
+                  colors.bar
+                }`}
+                style={{ width: `${Math.min((matter.consumedMinutes / matter.hour_cap) * 100, 100)}%` }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
