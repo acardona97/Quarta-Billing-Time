@@ -73,10 +73,51 @@ export default function ClientsPage() {
   const [newClientName, setNewClientName] = useState("")
   const [newClientNit, setNewClientNit] = useState("")
   const [newClientCap, setNewClientCap] = useState("")
+  const [newClientIsFirm, setNewClientIsFirm] = useState(false)
+
+  const [editClientOpen, setEditClientOpen] = useState(false)
+  const [editClientName, setEditClientName] = useState("")
+  const [editClientNit, setEditClientNit] = useState("")
+  const [editClientCap, setEditClientCap] = useState("")
 
   const [invoiceMatter, setInvoiceMatter] = useState<MatterWithHours | null>(null)
 
   const isSuperAdmin = userRole === "super_admin"
+
+  function canEditClient(client: ClientWithData | null) {
+    if (!client) return false
+    return client.is_firm_client ? isSuperAdmin : true
+  }
+
+  function openEditClient(client: ClientWithData) {
+    setEditClientName(client.name)
+    setEditClientNit(client.nit || "")
+    setEditClientCap(client.monthly_hour_cap ? (client.monthly_hour_cap / 60).toString() : "")
+    setEditClientOpen(true)
+  }
+
+  async function handleUpdateClient() {
+    if (!selectedClient) return
+    if (!editClientName.trim()) { toast.error("Nombre requerido"); return }
+
+    const capHours = parseFloat(editClientCap)
+    const hasCap = !isNaN(capHours) && capHours > 0
+
+    const { error } = await supabase
+      .from("clients")
+      .update({
+        name: editClientName.trim(),
+        nit: editClientNit.trim() || null,
+        monthly_hour_cap: hasCap ? Math.round(capHours * 60) : null,
+        billing_type: hasCap ? "fee" : selectedClient.billing_type,
+      })
+      .eq("id", selectedClient.id)
+
+    if (error) { toast.error("Error: " + error.message); return }
+    toast.success("Cliente actualizado")
+    setEditClientOpen(false)
+    loadClients()
+  }
 
   useEffect(() => {
     loadClients()
@@ -190,6 +231,7 @@ export default function ClientsPage() {
     const { data: { user: currentUser } } = await supabase.auth.getUser()
     const capHours = parseFloat(newClientCap)
     const hasCap = !isNaN(capHours) && capHours > 0
+    const asFirm = isSuperAdmin && newClientIsFirm
 
     const { data: client, error } = await supabase
       .from("clients")
@@ -198,6 +240,7 @@ export default function ClientsPage() {
         nit: newClientNit.trim() || null,
         billing_type: hasCap ? "fee" : "hourly",
         monthly_hour_cap: hasCap ? Math.round(capHours * 60) : null,
+        is_firm_client: asFirm,
         created_by: currentUser?.id || null,
       })
       .select()
@@ -208,7 +251,8 @@ export default function ClientsPage() {
       return
     }
 
-    if (currentUser) {
+    // Firm clients are visible to all via RLS — no per-user assignment needed
+    if (currentUser && !asFirm) {
       await supabase.from("user_client_assignments").insert({
         user_id: currentUser.id,
         client_id: client.id,
@@ -222,6 +266,7 @@ export default function ClientsPage() {
     setNewClientName("")
     setNewClientNit("")
     setNewClientCap("")
+    setNewClientIsFirm(false)
     setNewClientOpen(false)
     loadClients()
   }
@@ -314,6 +359,20 @@ export default function ClientsPage() {
                       Si pones un cap, el cliente es de fee mensual. El cap es único y compartido por todos los asuntos de fee. Se reinicia cada mes o al agotarse.
                     </p>
                   </div>
+                  {isSuperAdmin && (
+                    <label className="flex items-center gap-2 cursor-pointer rounded-xl bg-white/5 border border-white/10 px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={newClientIsFirm}
+                        onChange={(e) => setNewClientIsFirm(e.target.checked)}
+                        className="accent-primary cursor-pointer"
+                      />
+                      <span className="text-xs flex items-center gap-1.5">
+                        <Lock className="h-3 w-3 text-primary/60" />
+                        Cliente de la firma (compartido por todos los abogados)
+                      </span>
+                    </label>
+                  )}
                   <Button onClick={handleCreateClient} className="w-full rounded-xl cursor-pointer">
                     Crear Cliente
                   </Button>
@@ -408,17 +467,54 @@ export default function ClientsPage() {
                     {selectedClient.is_firm_client ? "Cliente de la firma" : "Asuntos"}
                   </p>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-red-400 cursor-pointer shrink-0"
-                  title={selectedClient.is_firm_client && !isSuperAdmin ? "Solo super admin" : "Borrar cliente"}
-                  onClick={() => handleDeleteClient(selectedClient)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                <div className="flex items-center gap-1 shrink-0">
+                  {canEditClient(selectedClient) && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-foreground cursor-pointer"
+                      title="Editar cliente / cap"
+                      onClick={() => openEditClient(selectedClient)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-red-400 cursor-pointer"
+                    title={selectedClient.is_firm_client && !isSuperAdmin ? "Solo super admin" : "Borrar cliente"}
+                    onClick={() => handleDeleteClient(selectedClient)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               </div>
             </div>
+
+            <Dialog open={editClientOpen} onOpenChange={setEditClientOpen}>
+              <DialogContent className="sm:max-w-md glass-panel border-glass-border rounded-2xl">
+                <DialogHeader>
+                  <DialogTitle>Editar Cliente</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 pt-2">
+                  <div>
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Nombre / Razón social</Label>
+                    <Input value={editClientName} onChange={(e) => setEditClientName(e.target.value)} className="rounded-xl bg-white/5 border-white/10" autoFocus />
+                  </div>
+                  <div>
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">NIT (opcional)</Label>
+                    <Input value={editClientNit} onChange={(e) => setEditClientNit(e.target.value)} placeholder="900123456" className="rounded-xl bg-white/5 border-white/10" />
+                  </div>
+                  <div>
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Cap de horas mensual (opcional)</Label>
+                    <Input type="number" step="0.5" value={editClientCap} onChange={(e) => setEditClientCap(e.target.value)} placeholder="Ej: 20 — vacío = sin cap" className="rounded-xl bg-white/5 border-white/10" />
+                    <p className="text-[10px] text-muted-foreground mt-1">Compartido por todos los asuntos de fee. Se reinicia cada mes o al agotarse.</p>
+                  </div>
+                  <Button onClick={handleUpdateClient} className="w-full rounded-xl cursor-pointer">Guardar cambios</Button>
+                </div>
+              </DialogContent>
+            </Dialog>
 
             <div className="flex-1 overflow-y-auto p-5">
               {selectedClient.matters.length === 0 ? (
