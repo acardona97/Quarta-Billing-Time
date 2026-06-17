@@ -68,7 +68,9 @@ export interface Client {
   id: string
   name: string
   billing_type: BillingType
-  monthly_hour_cap: number | null
+  monthly_hour_cap: number | null   // cap mensual compartido en minutos (solo fee)
+  nit: string | null
+  is_firm_client: boolean           // cliente precreado de la firma (cap compartido)
   is_active: boolean
   notes: string | null
   created_at: string

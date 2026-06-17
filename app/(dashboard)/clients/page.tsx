@@ -20,7 +20,7 @@ import { startOfMonthBogota, todayBogota } from "@/lib/utils/date"
 import { toast } from "sonner"
 import {
   Plus, Building2, FolderOpen, Clock, Search, Check, X, Trash2,
-  DollarSign, Send, Receipt, AlertTriangle, Pencil,
+  DollarSign, Send, Receipt, AlertTriangle, Pencil, Lock,
 } from "lucide-react"
 import type { Client, Matter, BillingType } from "@/lib/types"
 import { BILLING_TYPE_SHORT } from "@/lib/types"
@@ -28,20 +28,34 @@ import { BILLING_TYPE_SHORT } from "@/lib/types"
 // ─── TYPES ───────────────────────────────────────────────
 
 interface MatterWithHours extends Matter {
-  consumedMinutes: number
+  consumedMinutes: number   // total compartido (todos los abogados, este mes)
+  myMinutes: number         // aporte propio del abogado (editable)
 }
 
 interface ClientWithData extends Client {
   matters: MatterWithHours[]
-  totalMinutes: number
+  totalMinutes: number      // total compartido de todos sus asuntos
+  myTotalMinutes: number    // aporte propio
 }
 
 // ─── COLORS PER BILLING TYPE ─────────────────────────────
 
-const BILLING_COLORS: Record<string, { bar: string; badge: string; glow: string }> = {
-  fee:     { bar: "bg-blue-400",    badge: "bg-blue-500/20 text-blue-300 border-blue-500/30",    glow: "shadow-[0_0_10px_rgba(59,130,246,0.3)]" },
-  hourly:  { bar: "bg-emerald-400", badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30", glow: "shadow-[0_0_10px_rgba(16,185,129,0.3)]" },
-  project: { bar: "bg-amber-400",   badge: "bg-amber-500/20 text-amber-300 border-amber-500/30",   glow: "shadow-[0_0_10px_rgba(245,158,11,0.3)]" },
+const BILLING_COLORS: Record<string, { bar: string; badge: string }> = {
+  fee:     { bar: "bg-blue-400",    badge: "bg-blue-500/20 text-blue-300 border-blue-500/30" },
+  hourly:  { bar: "bg-emerald-400", badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" },
+  project: { bar: "bg-amber-400",   badge: "bg-amber-500/20 text-amber-300 border-amber-500/30" },
+}
+
+// ─── FEE CAP STATUS (stateless reset: monthly OR on exhaustion) ──
+
+function feeCapStatus(consumedMinutes: number, capMinutes: number | null) {
+  if (!capMinutes || capMinutes <= 0) {
+    return { hasCap: false, current: consumedMinutes, cap: 0, pct: 0, cycles: 0 }
+  }
+  const cycles = Math.floor(consumedMinutes / capMinutes)
+  const current = consumedMinutes % capMinutes
+  const pct = Math.round((current / capMinutes) * 100)
+  return { hasCap: true, current, cap: capMinutes, pct, cycles }
 }
 
 // ─── MAIN PAGE — 3-Column Layout ─────────────────────────
@@ -52,9 +66,17 @@ export default function ClientsPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
   const [selectedClient, setSelectedClient] = useState<ClientWithData | null>(null)
+  const [userRole, setUserRole] = useState<string>("attorney")
+  const [userId, setUserId] = useState<string>("")
+
   const [newClientOpen, setNewClientOpen] = useState(false)
   const [newClientName, setNewClientName] = useState("")
+  const [newClientNit, setNewClientNit] = useState("")
+  const [newClientCap, setNewClientCap] = useState("")
+
   const [invoiceMatter, setInvoiceMatter] = useState<MatterWithHours | null>(null)
+
+  const isSuperAdmin = userRole === "super_admin"
 
   useEffect(() => {
     loadClients()
@@ -76,7 +98,17 @@ export default function ClientsPage() {
 
     const { data: { user: authUser } } = await supabase.auth.getUser()
     if (!authUser) { setLoading(false); return }
+    setUserId(authUser.id)
 
+    // Own role (gates firm-client edit/delete)
+    const { data: me } = await supabase
+      .from("users")
+      .select("role")
+      .eq("id", authUser.id)
+      .single()
+    if (me?.role) setUserRole(me.role)
+
+    // Assigned clients + firm-wide clients
     const { data: assignments } = await supabase
       .from("user_client_assignments")
       .select("client_id")
@@ -85,52 +117,65 @@ export default function ClientsPage() {
 
     const myClientIds = (assignments || []).map((a) => a.client_id)
 
-    if (myClientIds.length === 0) {
-      setClients([])
-      setLoading(false)
-      return
-    }
-
-    const { data: clientsData } = await supabase
+    let query = supabase
       .from("clients")
       .select(`*, matters(*)`)
-      .in("id", myClientIds)
       .eq("is_active", true)
       .order("name")
 
+    if (myClientIds.length > 0) {
+      query = query.or(`is_firm_client.eq.true,id.in.(${myClientIds.join(",")})`)
+    } else {
+      query = query.eq("is_firm_client", true)
+    }
+
+    const { data: clientsData } = await query
+
     if (clientsData) {
+      // Shared firm-wide consumption per matter (current calendar month)
+      const { data: sharedRows } = await supabase.rpc("matter_consumption_current_month")
+      const sharedByMatter = (sharedRows || []).reduce((acc: Record<string, number>, r: any) => {
+        acc[r.matter_id] = Number(r.total_minutes) || 0
+        return acc
+      }, {})
+
+      // Own contribution per matter (this month) — for the editable hours field
       const monthStart = startOfMonthBogota()
-      const { data: hours } = await supabase
+      const { data: mine } = await supabase
         .from("time_entries")
-        .select("client_id, matter_id, duration_minutes")
+        .select("matter_id, duration_minutes")
         .eq("user_id", authUser.id)
-        .in("client_id", myClientIds)
         .gte("entry_date", monthStart)
 
-      const hoursByMatter = (hours || []).reduce((acc, h) => {
+      const myByMatter = (mine || []).reduce((acc: Record<string, number>, h: any) => {
         acc[h.matter_id] = (acc[h.matter_id] || 0) + h.duration_minutes
         return acc
-      }, {} as Record<string, number>)
+      }, {})
 
-      const hoursByClient = (hours || []).reduce((acc, h) => {
-        acc[h.client_id] = (acc[h.client_id] || 0) + h.duration_minutes
-        return acc
-      }, {} as Record<string, number>)
+      const built: ClientWithData[] = clientsData.map((c: any) => {
+        const matters: MatterWithHours[] = (c.matters || [])
+          .filter((m: any) => m.is_active !== false)
+          .map((m: any) => ({
+            ...m,
+            consumedMinutes: sharedByMatter[m.id] || 0,
+            myMinutes: myByMatter[m.id] || 0,
+          }))
+        const totalMinutes = matters.reduce((s, m) => s + m.consumedMinutes, 0)
+        const myTotalMinutes = matters.reduce((s, m) => s + m.myMinutes, 0)
+        return { ...c, matters, totalMinutes, myTotalMinutes }
+      })
 
-      const built = clientsData.map((c: any) => ({
-        ...c,
-        matters: (c.matters || []).map((m: any) => ({
-          ...m,
-          consumedMinutes: hoursByMatter[m.id] || 0,
-        })),
-        totalMinutes: hoursByClient[c.id] || 0,
-      }))
+      // Firm clients first, then alphabetical
+      built.sort((a, b) => {
+        if (a.is_firm_client !== b.is_firm_client) return a.is_firm_client ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
 
       setClients(built)
 
       if (selectedClient) {
         const refreshed = built.find((c) => c.id === selectedClient.id)
-        if (refreshed) setSelectedClient(refreshed)
+        setSelectedClient(refreshed || null)
       }
     }
     setLoading(false)
@@ -143,12 +188,16 @@ export default function ClientsPage() {
     }
 
     const { data: { user: currentUser } } = await supabase.auth.getUser()
+    const capHours = parseFloat(newClientCap)
+    const hasCap = !isNaN(capHours) && capHours > 0
 
     const { data: client, error } = await supabase
       .from("clients")
       .insert({
         name: newClientName.trim(),
-        billing_type: "hourly",
+        nit: newClientNit.trim() || null,
+        billing_type: hasCap ? "fee" : "hourly",
+        monthly_hour_cap: hasCap ? Math.round(capHours * 60) : null,
         created_by: currentUser?.id || null,
       })
       .select()
@@ -167,16 +216,32 @@ export default function ClientsPage() {
       })
     }
 
-    await supabase.from("matters").insert({
-      client_id: client.id,
-      name: "General",
-      is_default: true,
-      billing_type: "hourly",
-    })
+    // NO se crean asuntos ni horas por defecto
 
     toast.success(`"${newClientName}" creado`)
     setNewClientName("")
+    setNewClientNit("")
+    setNewClientCap("")
     setNewClientOpen(false)
+    loadClients()
+  }
+
+  async function handleDeleteClient(client: ClientWithData) {
+    if (client.is_firm_client && !isSuperAdmin) {
+      toast.error("Solo el super admin puede borrar clientes de la firma")
+      return
+    }
+    if (!window.confirm(`¿Borrar el cliente "${client.name}" y todos sus asuntos y horas? Esta acción no se puede deshacer.`)) {
+      return
+    }
+
+    const { error } = await supabase.from("clients").delete().eq("id", client.id)
+    if (error) {
+      toast.error("Error al borrar: " + error.message)
+      return
+    }
+    toast.success(`"${client.name}" eliminado`)
+    setSelectedClient(null)
     loadClients()
   }
 
@@ -184,14 +249,14 @@ export default function ClientsPage() {
     c.name.toLowerCase().includes(search.toLowerCase())
   )
 
-  // Calculate billing metrics for selected client
-  const feeMatters = selectedClient?.matters.filter((m) => m.billing_type === "fee") || []
+  // Per-type aggregates for selected client (shared totals)
+  const feeMatters = selectedClient?.matters.filter((m) => (m.billing_type || "fee") === "fee") || []
   const hourlyMatters = selectedClient?.matters.filter((m) => m.billing_type === "hourly") || []
   const projectMatters = selectedClient?.matters.filter((m) => m.billing_type === "project") || []
   const feeConsumed = feeMatters.reduce((s, m) => s + m.consumedMinutes, 0)
-  const feeCap = feeMatters.reduce((s, m) => s + (m.hour_cap || 0), 0)
   const hourlyConsumed = hourlyMatters.reduce((s, m) => s + m.consumedMinutes, 0)
   const projectConsumed = projectMatters.reduce((s, m) => s + m.consumedMinutes, 0)
+  const feeCap = feeCapStatus(feeConsumed, selectedClient?.monthly_hour_cap || null)
 
   return (
     <div className="flex h-full gap-4 p-4">
@@ -214,16 +279,41 @@ export default function ClientsPage() {
                   <DialogTitle>Crear Cliente</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4 pt-2">
-                  <Input
-                    value={newClientName}
-                    onChange={(e) => setNewClientName(e.target.value)}
-                    placeholder="Nombre del cliente o razón social"
-                    className="rounded-xl bg-white/5 border-white/10"
-                    autoFocus
-                  />
-                  <p className="text-[10px] text-muted-foreground">
-                    La modalidad de cobro se define al agregar cada asunto.
-                  </p>
+                  <div>
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Nombre / Razón social</Label>
+                    <Input
+                      value={newClientName}
+                      onChange={(e) => setNewClientName(e.target.value)}
+                      placeholder="Nombre del cliente"
+                      className="rounded-xl bg-white/5 border-white/10"
+                      autoFocus
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">NIT (opcional)</Label>
+                    <Input
+                      value={newClientNit}
+                      onChange={(e) => setNewClientNit(e.target.value)}
+                      placeholder="900123456"
+                      className="rounded-xl bg-white/5 border-white/10"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">
+                      Cap de horas mensual (opcional)
+                    </Label>
+                    <Input
+                      type="number"
+                      step="0.5"
+                      value={newClientCap}
+                      onChange={(e) => setNewClientCap(e.target.value)}
+                      placeholder="Ej: 20 (solo fee mensual)"
+                      className="rounded-xl bg-white/5 border-white/10"
+                    />
+                    <p className="text-[10px] text-muted-foreground mt-1">
+                      Si pones un cap, el cliente es de fee mensual. El cap es único y compartido por todos los asuntos de fee. Se reinicia cada mes o al agotarse.
+                    </p>
+                  </div>
                   <Button onClick={handleCreateClient} className="w-full rounded-xl cursor-pointer">
                     Crear Cliente
                   </Button>
@@ -254,10 +344,10 @@ export default function ClientsPage() {
           ) : (
             filtered.map((client) => {
               const isSelected = selectedClient?.id === client.id
-              const hasFee = client.matters.some((m) => m.billing_type === "fee")
-              const feeMins = client.matters.filter((m) => m.billing_type === "fee").reduce((s, m) => s + m.consumedMinutes, 0)
-              const fCap = client.matters.filter((m) => m.billing_type === "fee").reduce((s, m) => s + (m.hour_cap || 0), 0)
-              const capPct = fCap > 0 ? Math.round((feeMins / fCap) * 100) : 0
+              const cFeeConsumed = client.matters
+                .filter((m) => (m.billing_type || "fee") === "fee")
+                .reduce((s, m) => s + m.consumedMinutes, 0)
+              const cap = feeCapStatus(cFeeConsumed, client.monthly_hour_cap)
 
               return (
                 <button
@@ -269,26 +359,32 @@ export default function ClientsPage() {
                       : "hover:bg-white/5 border border-transparent"
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-sm truncate">{client.name}</span>
-                    <div className="flex items-center gap-1.5">
-                      {hasFee && capPct >= 80 ? (
-                        <Badge className="text-[9px] px-1.5 py-0 bg-amber-500/20 text-amber-300 border border-amber-500/30 gap-0.5">
-                          <AlertTriangle className="h-2.5 w-2.5" />
-                          Cap alto
-                        </Badge>
-                      ) : (
-                        <Badge className="text-[9px] px-1.5 py-0 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                          Activo
-                        </Badge>
-                      )}
-                    </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-sm truncate flex items-center gap-1.5">
+                      {client.is_firm_client && <Lock className="h-3 w-3 text-primary/60 shrink-0" />}
+                      {client.name}
+                    </span>
+                    {cap.hasCap && cap.pct >= 80 ? (
+                      <Badge className="text-[9px] px-1.5 py-0 bg-amber-500/20 text-amber-300 border border-amber-500/30 gap-0.5 shrink-0">
+                        <AlertTriangle className="h-2.5 w-2.5" />
+                        {cap.pct}%
+                      </Badge>
+                    ) : client.totalMinutes > 0 ? (
+                      <Badge className="text-[9px] px-1.5 py-0 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
+                        Activo
+                      </Badge>
+                    ) : null}
                   </div>
-                  {client.totalMinutes > 0 && (
+                  {cap.hasCap ? (
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Cap: {formatDuration(cap.current)} / {formatDuration(cap.cap)}
+                      {cap.cycles > 0 && ` · reiniciado ${cap.cycles}×`}
+                    </p>
+                  ) : client.totalMinutes > 0 ? (
                     <p className="text-[11px] text-muted-foreground mt-1">
                       {formatDuration(client.totalMinutes)} este mes
                     </p>
-                  )}
+                  ) : null}
                 </button>
               )
             })
@@ -296,25 +392,28 @@ export default function ClientsPage() {
         </div>
       </div>
 
-      {/* ─── Column 2: Matters & Timeline ───────────────── */}
+      {/* ─── Column 2: Matters ──────────────────────────── */}
       <div className="flex-1 flex flex-col glass-panel rounded-3xl overflow-hidden">
         {selectedClient ? (
           <>
             <div className="p-5 pb-3 border-b border-white/5">
               <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold">
-                  {selectedClient.name}
-                  <span className="text-muted-foreground font-normal text-sm ml-2">
-                    Asuntos
-                  </span>
-                </h2>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    {selectedClient.is_firm_client && <Lock className="h-4 w-4 text-primary/60" />}
+                    {selectedClient.name}
+                  </h2>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    {selectedClient.nit ? `NIT ${selectedClient.nit} · ` : ""}
+                    {selectedClient.is_firm_client ? "Cliente de la firma" : "Asuntos"}
+                  </p>
+                </div>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-red-400 cursor-pointer"
-                  onClick={() => {
-                    // Delete handler
-                  }}
+                  className="h-7 w-7 text-muted-foreground hover:text-red-400 cursor-pointer shrink-0"
+                  title={selectedClient.is_firm_client && !isSuperAdmin ? "Solo super admin" : "Borrar cliente"}
+                  onClick={() => handleDeleteClient(selectedClient)}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
@@ -322,26 +421,35 @@ export default function ClientsPage() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-5">
-              {/* Timeline */}
-              <div className="relative">
-                {/* Vertical line */}
-                <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-primary/40 via-primary/20 to-transparent" />
-
-                <div className="space-y-4 pl-10">
-                  {selectedClient.matters.map((matter) => (
-                    <EditableMatterCard
-                      key={matter.id}
-                      matter={matter}
-                      clientId={selectedClient.id}
-                      onInvoice={() => setInvoiceMatter(matter)}
-                      onRefresh={loadClients}
-                    />
-                  ))}
+              {selectedClient.matters.length === 0 ? (
+                <div className="text-center py-10 text-muted-foreground">
+                  <FolderOpen className="h-10 w-10 mx-auto mb-2 opacity-20" />
+                  <p className="text-sm">Sin asuntos todavía</p>
+                  <p className="text-xs mt-1 opacity-60">Agrega el primer asunto abajo</p>
                 </div>
-              </div>
+              ) : (
+                <div className="relative">
+                  <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-primary/40 via-primary/20 to-transparent" />
+                  <div className="space-y-4 pl-10">
+                    {selectedClient.matters.map((matter) => (
+                      <EditableMatterCard
+                        key={matter.id}
+                        matter={matter}
+                        clientId={selectedClient.id}
+                        clientCap={selectedClient.monthly_hour_cap}
+                        onInvoice={() => setInvoiceMatter(matter)}
+                        onRefresh={loadClients}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
 
-              {/* Add matter */}
-              <AddMatterSection clientId={selectedClient.id} onRefresh={loadClients} />
+              <AddMatterSection
+                clientId={selectedClient.id}
+                isFeeClient={!!selectedClient.monthly_hour_cap}
+                onRefresh={loadClients}
+              />
             </div>
           </>
         ) : (
@@ -349,19 +457,19 @@ export default function ClientsPage() {
             <div className="text-center">
               <FolderOpen className="h-12 w-12 mx-auto mb-3 opacity-20" />
               <p className="text-sm">Selecciona un cliente</p>
-              <p className="text-xs mt-1 opacity-50">para ver sus asuntos y timeline</p>
+              <p className="text-xs mt-1 opacity-50">para ver sus asuntos</p>
             </div>
           </div>
         )}
       </div>
 
-      {/* ─── Column 3: Billing Metrics & Quick Log ──────── */}
+      {/* ─── Column 3: Conteo de Horas ──────────────────── */}
       <div className="w-80 shrink-0 flex flex-col glass-panel rounded-3xl overflow-hidden">
         {selectedClient ? (
           <div className="p-5 space-y-5 overflow-y-auto flex-1">
             <h3 className="text-base font-semibold">Conteo de Horas</h3>
 
-            {/* ── Fee / Paquete ── */}
+            {/* Fee / Paquete — shared cap */}
             {feeMatters.length > 0 && (
               <div className="glass-panel rounded-2xl p-3 space-y-2">
                 <div className="flex items-center gap-2">
@@ -370,73 +478,74 @@ export default function ClientsPage() {
                 </div>
                 <div className="flex items-end justify-between">
                   <div>
-                    <p className="text-2xl font-bold tabular-nums text-blue-300">{formatDuration(feeConsumed)}</p>
-                    <p className="text-[10px] text-muted-foreground">registradas</p>
+                    <p className="text-2xl font-bold tabular-nums text-blue-300">
+                      {formatDuration(feeCap.hasCap ? feeCap.current : feeConsumed)}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">registradas (todos)</p>
                   </div>
-                  {feeCap > 0 && (
+                  {feeCap.hasCap && (
                     <div className="text-right">
-                      <p className="text-sm font-semibold tabular-nums">{formatDuration(feeCap)}</p>
+                      <p className="text-sm font-semibold tabular-nums">{formatDuration(feeCap.cap)}</p>
                       <p className="text-[10px] text-muted-foreground">cap máximo</p>
                     </div>
                   )}
                 </div>
-                {feeCap > 0 && (() => {
-                  const pct = Math.round((feeConsumed / feeCap) * 100)
-                  return (
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-[10px] text-muted-foreground">
-                        <span>Consumo</span>
-                        <span className={pct >= 100 ? "text-red-400 font-semibold" : pct >= 80 ? "text-amber-400" : ""}>{pct}%</span>
-                      </div>
-                      <div className="h-2 bg-white/5 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${
-                            pct >= 100 ? "bg-red-400" : pct >= 80 ? "bg-amber-400" : "bg-blue-400"
-                          }`}
-                          style={{ width: `${Math.min(pct, 100)}%` }}
-                        />
-                      </div>
+                {feeCap.hasCap && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[10px] text-muted-foreground">
+                      <span>Consumo del cap</span>
+                      <span className={feeCap.pct >= 100 ? "text-red-400 font-semibold" : feeCap.pct >= 80 ? "text-amber-400" : ""}>
+                        {feeCap.pct}%
+                      </span>
                     </div>
-                  )
-                })()}
+                    <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          feeCap.pct >= 100 ? "bg-red-400" : feeCap.pct >= 80 ? "bg-amber-400" : "bg-blue-400"
+                        }`}
+                        style={{ width: `${Math.min(feeCap.pct, 100)}%` }}
+                      />
+                    </div>
+                    {feeCap.cycles > 0 && (
+                      <p className="text-[10px] text-amber-400">
+                        Cap agotado y reiniciado {feeCap.cycles}× este mes
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
-            {/* ── Proyecto / Trabajo Concreto ── */}
+            {/* Proyecto */}
             {projectMatters.length > 0 && (
-              <div className="glass-panel rounded-2xl p-3 space-y-2">
+              <div className="glass-panel rounded-2xl p-3 space-y-1.5">
                 <div className="flex items-center gap-2">
                   <div className="w-2.5 h-2.5 rounded-full bg-amber-400" />
                   <p className="text-xs font-semibold text-amber-300">Proyecto / Trabajo Concreto</p>
                 </div>
                 <p className="text-2xl font-bold tabular-nums text-amber-300">{formatDuration(projectConsumed)}</p>
-                <p className="text-[10px] text-muted-foreground">horas registradas — conteo independiente</p>
+                <p className="text-[10px] text-muted-foreground">conteo independiente</p>
               </div>
             )}
 
-            {/* ── Horas Postpago ── */}
+            {/* Postpago */}
             {hourlyMatters.length > 0 && (() => {
-              const avgRate = hourlyMatters.reduce((s, m) => s + (m.hourly_rate || 0), 0) / hourlyMatters.length
               const totalCOP = hourlyMatters.reduce((s, m) => s + (m.consumedMinutes / 60) * (m.hourly_rate || 0), 0)
+              const hasRate = hourlyMatters.some((m) => (m.hourly_rate || 0) > 0)
               return (
-                <div className="glass-panel rounded-2xl p-3 space-y-2">
+                <div className="glass-panel rounded-2xl p-3 space-y-1.5">
                   <div className="flex items-center gap-2">
                     <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
                     <p className="text-xs font-semibold text-emerald-300">Horas Postpago</p>
                   </div>
                   <p className="text-2xl font-bold tabular-nums text-emerald-300">{formatDuration(hourlyConsumed)}</p>
-                  {avgRate > 0 && (
-                    <div className="space-y-1">
-                      <p className="text-[10px] text-muted-foreground">
-                        {(hourlyConsumed / 60).toFixed(1)}h × ${new Intl.NumberFormat("es-CO").format(Math.round(avgRate))}/h
+                  {hasRate && (
+                    <div className="flex items-baseline gap-1">
+                      <DollarSign className="h-3 w-3 text-emerald-400" />
+                      <p className="text-lg font-bold tabular-nums text-emerald-300">
+                        {new Intl.NumberFormat("es-CO").format(Math.round(totalCOP))}
                       </p>
-                      <div className="flex items-baseline gap-1">
-                        <DollarSign className="h-3 w-3 text-emerald-400" />
-                        <p className="text-lg font-bold tabular-nums text-emerald-300">
-                          {new Intl.NumberFormat("es-CO").format(Math.round(totalCOP))}
-                        </p>
-                        <span className="text-[10px] text-muted-foreground">más IVA</span>
-                      </div>
+                      <span className="text-[10px] text-muted-foreground">más IVA (a facturar)</span>
                     </div>
                   )}
                   <p className="text-[10px] text-muted-foreground">conteo independiente</p>
@@ -444,25 +553,20 @@ export default function ClientsPage() {
               )
             })()}
 
-            {/* ── TOTAL CLIENTE ── */}
+            {/* TOTAL */}
             <div className="border-t border-white/10 pt-4">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold">Total Horas Cliente</p>
                 <p className="text-2xl font-bold tabular-nums">{formatDuration(selectedClient.totalMinutes)}</p>
               </div>
               <p className="text-[10px] text-muted-foreground mt-0.5">
-                {feeMatters.length > 0 ? formatDuration(feeConsumed) + " fee" : ""}
-                {feeMatters.length > 0 && projectMatters.length > 0 ? " + " : ""}
-                {projectMatters.length > 0 ? formatDuration(projectConsumed) + " proyecto" : ""}
-                {(feeMatters.length > 0 || projectMatters.length > 0) && hourlyMatters.length > 0 ? " + " : ""}
-                {hourlyMatters.length > 0 ? formatDuration(hourlyConsumed) + " postpago" : ""}
+                Suma de las modalidades · este mes
               </p>
-            </div>
-
-            {/* Quick Log */}
-            <div className="pt-2 border-t border-white/5">
-              <h4 className="text-sm font-semibold mb-3">Registro Rápido</h4>
-              <QuickLogForm client={selectedClient} />
+              {selectedClient.myTotalMinutes > 0 && (
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Tu aporte: {formatDuration(selectedClient.myTotalMinutes)}
+                </p>
+              )}
             </div>
           </div>
         ) : (
@@ -493,11 +597,13 @@ export default function ClientsPage() {
 function EditableMatterCard({
   matter,
   clientId,
+  clientCap,
   onInvoice,
   onRefresh,
 }: {
   matter: MatterWithHours
   clientId: string
+  clientCap: number | null
   onInvoice: () => void
   onRefresh: () => void
 }) {
@@ -505,20 +611,22 @@ function EditableMatterCard({
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(matter.name)
   const [editDesc, setEditDesc] = useState(matter.description || "")
+  const [editType, setEditType] = useState<BillingType>((matter.billing_type || "fee") as BillingType)
   const [editHours, setEditHours] = useState("")
-  const [editCap, setEditCap] = useState(matter.hour_cap ? (matter.hour_cap / 60).toString() : "")
   const [editRate, setEditRate] = useState(matter.hourly_rate?.toString() || "")
+  const [editFee, setEditFee] = useState(matter.fixed_fee?.toString() || "")
   const [saving, setSaving] = useState(false)
 
-  const bt = matter.billing_type || "hourly"
-  const colors = BILLING_COLORS[bt] || BILLING_COLORS.hourly
+  const bt = matter.billing_type || "fee"
+  const colors = BILLING_COLORS[bt] || BILLING_COLORS.fee
 
   function startEdit() {
     setEditName(matter.name)
     setEditDesc(matter.description || "")
-    setEditHours((matter.consumedMinutes / 60).toFixed(2))
-    setEditCap(matter.hour_cap ? (matter.hour_cap / 60).toString() : "")
+    setEditType((matter.billing_type || "fee") as BillingType)
+    setEditHours((matter.myMinutes / 60).toFixed(2))
     setEditRate(matter.hourly_rate?.toString() || "")
+    setEditFee(matter.fixed_fee?.toString() || "")
     setEditing(true)
   }
 
@@ -528,58 +636,37 @@ function EditableMatterCard({
     const updates: Record<string, unknown> = {
       name: editName.trim() || matter.name,
       description: editDesc.trim() || null,
+      billing_type: editType,
+      hourly_rate: editType === "hourly" && editRate ? parseFloat(editRate) : null,
+      fixed_fee: editType === "project" && editFee ? parseFloat(editFee) : null,
     }
 
-    if (bt === "fee" && editCap) updates.hour_cap = Math.round(parseFloat(editCap) * 60)
-    if (bt === "hourly" && editRate) updates.hourly_rate = parseFloat(editRate)
-
-    const { error } = await supabase
-      .from("matters")
-      .update(updates)
-      .eq("id", matter.id)
-
+    const { error } = await supabase.from("matters").update(updates).eq("id", matter.id)
     if (error) {
       toast.error("Error: " + error.message)
       setSaving(false)
       return
     }
 
-    // Update hours if changed
+    // Adjust the attorney's OWN hours to the new value (creates a correction entry)
     const newMinutes = Math.round(parseFloat(editHours || "0") * 60)
-    const diff = newMinutes - matter.consumedMinutes
-
+    const diff = newMinutes - matter.myMinutes
     if (diff !== 0) {
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
-        if (diff > 0) {
-          await supabase.from("time_entries").insert({
-            user_id: user.id,
-            client_id: clientId,
-            matter_id: matter.id,
-            entry_date: todayBogota(),
-            duration_minutes: diff,
-            description: `Ajuste de horas — ${editName}`,
-            is_billable: true,
-            source: "manual",
-            billing_status: "draft",
-            created_by: user.id,
-            applied_rate: bt === "hourly" && editRate ? parseFloat(editRate) : null,
-          })
-        } else {
-          await supabase.from("time_entries").insert({
-            user_id: user.id,
-            client_id: clientId,
-            matter_id: matter.id,
-            entry_date: todayBogota(),
-            duration_minutes: diff,
-            description: `Corrección de horas — ${editName}`,
-            is_billable: true,
-            source: "manual",
-            billing_status: "draft",
-            created_by: user.id,
-            applied_rate: bt === "hourly" && editRate ? parseFloat(editRate) : null,
-          })
-        }
+        await supabase.from("time_entries").insert({
+          user_id: user.id,
+          client_id: clientId,
+          matter_id: matter.id,
+          entry_date: todayBogota(),
+          duration_minutes: diff,
+          description: `Ajuste de horas — ${editName}`,
+          is_billable: true,
+          source: "manual",
+          billing_status: "draft",
+          created_by: user.id,
+          applied_rate: editType === "hourly" && editRate ? parseFloat(editRate) : null,
+        })
         window.dispatchEvent(new CustomEvent("time-entry-created"))
       }
     }
@@ -590,10 +677,22 @@ function EditableMatterCard({
     onRefresh()
   }
 
+  async function handleDeleteMatter() {
+    if (!window.confirm(`¿Borrar el asunto "${matter.name}" y sus horas? No se puede deshacer.`)) return
+    const { error } = await supabase.from("matters").delete().eq("id", matter.id)
+    if (error) {
+      toast.error("Error al borrar: " + error.message)
+      return
+    }
+    toast.success("Asunto eliminado")
+    window.dispatchEvent(new CustomEvent("time-entry-created"))
+    onRefresh()
+  }
+
   if (editing) {
     return (
       <div className="relative">
-        <div className={`absolute -left-[34px] top-4 w-3 h-3 rounded-full border-2 border-background bg-primary glow-blue-sm`} />
+        <div className="absolute -left-[34px] top-4 w-3 h-3 rounded-full border-2 border-background bg-primary glow-blue-sm" />
         <div className="glass-panel rounded-2xl p-4 border border-primary/30 space-y-3">
           <p className="text-xs font-semibold text-primary">Editando asunto</p>
           <Input
@@ -610,9 +709,20 @@ function EditableMatterCard({
             className="rounded-xl bg-white/5 border-white/10 h-8 text-xs"
           />
           <div>
-            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              Horas registradas este mes
-            </Label>
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Modalidad</Label>
+            <Select value={editType} onValueChange={(v) => setEditType((v ?? "fee") as BillingType)}>
+              <SelectTrigger className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="fee">Fee mensual / Paquete (consume cap)</SelectItem>
+                <SelectItem value="hourly">Horas postpago</SelectItem>
+                <SelectItem value="project">Proyecto / Trabajo concreto</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Tus horas este mes</Label>
             <Input
               type="number"
               step="0.25"
@@ -621,20 +731,23 @@ function EditableMatterCard({
               className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1"
             />
             <p className="text-[9px] text-muted-foreground mt-0.5">
-              Actual: {(matter.consumedMinutes / 60).toFixed(2)}h — cambia para ajustar
+              Tu aporte actual: {(matter.myMinutes / 60).toFixed(2)}h — cambia para ajustar
             </p>
           </div>
-          {bt === "fee" && (
-            <div>
-              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Cap (horas)</Label>
-              <Input type="number" value={editCap} onChange={(e) => setEditCap(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
-            </div>
-          )}
-          {bt === "hourly" && (
+          {editType === "hourly" && (
             <div>
               <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Valor hora COP</Label>
               <Input type="number" value={editRate} onChange={(e) => setEditRate(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
             </div>
+          )}
+          {editType === "project" && (
+            <div>
+              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Valor total COP</Label>
+              <Input type="number" value={editFee} onChange={(e) => setEditFee(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
+            </div>
+          )}
+          {editType === "fee" && (
+            <p className="text-[9px] text-muted-foreground">Las horas de fee consumen el cap compartido del cliente.</p>
           )}
           <div className="flex gap-2">
             <Button size="sm" onClick={handleSave} disabled={saving} className="flex-1 rounded-xl text-xs h-8 cursor-pointer">
@@ -649,6 +762,9 @@ function EditableMatterCard({
     )
   }
 
+  const showCapBar = bt === "fee" && clientCap != null && clientCap > 0
+  const capPct = showCapBar ? Math.round(((matter.consumedMinutes % clientCap!) / clientCap!) * 100) : 0
+
   return (
     <div className="relative group">
       <div className={`absolute -left-[34px] top-4 w-3 h-3 rounded-full border-2 border-background ${
@@ -657,15 +773,15 @@ function EditableMatterCard({
 
       <div className="glass-panel glass-panel-hover rounded-2xl p-4 transition-all">
         <div className="flex items-start justify-between mb-2">
-          <div>
+          <div className="min-w-0">
             <p className="font-medium text-sm">{matter.name}</p>
             {matter.description && (
               <p className="text-[11px] text-muted-foreground mt-0.5">{matter.description}</p>
             )}
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1 shrink-0">
             <Badge className={`text-[9px] px-1.5 py-0 border ${colors.badge}`}>
-              {BILLING_TYPE_SHORT[bt as BillingType] || "Horas"}
+              {BILLING_TYPE_SHORT[bt as BillingType] || "Fee"}
             </Badge>
             <button
               onClick={startEdit}
@@ -674,15 +790,20 @@ function EditableMatterCard({
             >
               <Pencil className="h-3.5 w-3.5" />
             </button>
-            {!matter.is_default && (
-              <button
-                onClick={onInvoice}
-                className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
-                title="Facturar"
-              >
-                <Receipt className="h-3.5 w-3.5" />
-              </button>
-            )}
+            <button
+              onClick={handleDeleteMatter}
+              className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-red-400 transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+              title="Borrar asunto"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={onInvoice}
+              className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
+              title="Facturar"
+            >
+              <Receipt className="h-3.5 w-3.5" />
+            </button>
           </div>
         </div>
 
@@ -699,20 +820,18 @@ function EditableMatterCard({
           </div>
         )}
 
-        {bt === "fee" && matter.hour_cap != null && matter.hour_cap > 0 && (
+        {showCapBar && (
           <div className="mt-3 space-y-1">
             <div className="flex justify-between text-[10px] text-muted-foreground">
-              <span>Cap consumido</span>
-              <span>{Math.round((matter.consumedMinutes / matter.hour_cap) * 100)}%</span>
+              <span>Consume el cap del cliente</span>
+              <span>{capPct}%</span>
             </div>
             <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all ${
-                  matter.consumedMinutes / matter.hour_cap >= 1 ? "bg-red-400" :
-                  matter.consumedMinutes / matter.hour_cap >= 0.8 ? "bg-amber-400" :
-                  colors.bar
+                  capPct >= 100 ? "bg-red-400" : capPct >= 80 ? "bg-amber-400" : colors.bar
                 }`}
-                style={{ width: `${Math.min((matter.consumedMinutes / matter.hour_cap) * 100, 100)}%` }}
+                style={{ width: `${Math.min(capPct, 100)}%` }}
               />
             </div>
           </div>
@@ -722,111 +841,22 @@ function EditableMatterCard({
   )
 }
 
-// ─── QUICK LOG FORM ──────────────────────────────────────
-
-function QuickLogForm({ client }: { client: ClientWithData }) {
-  const supabase = createClient()
-  const [matterId, setMatterId] = useState(client.matters[0]?.id || "")
-  const [duration, setDuration] = useState("1h 00m")
-  const [saving, setSaving] = useState(false)
-
-  useEffect(() => {
-    if (client.matters.length > 0 && !client.matters.find((m) => m.id === matterId)) {
-      setMatterId(client.matters[0].id)
-    }
-  }, [client.id])
-
-  async function handleLog() {
-    if (!matterId) return
-    setSaving(true)
-
-    const match = duration.match(/(\d+)h\s*(\d+)m/)
-    const mins = match ? parseInt(match[1]) * 60 + parseInt(match[2]) : 60
-
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) { setSaving(false); return }
-
-    const matter = client.matters.find((m) => m.id === matterId)
-
-    const { error } = await supabase.from("time_entries").insert({
-      user_id: user.id,
-      client_id: client.id,
-      matter_id: matterId,
-      entry_date: todayBogota(),
-      duration_minutes: mins,
-      description: `Registro rápido — ${matter?.name || ""}`,
-      is_billable: true,
-      source: "manual",
-      billing_status: "draft",
-      created_by: user.id,
-      applied_rate: matter?.hourly_rate || null,
-    })
-
-    if (error) {
-      toast.error("Error: " + error.message)
-    } else {
-      toast.success(`${formatDuration(mins)} registradas`)
-      window.dispatchEvent(new CustomEvent("time-entry-created"))
-    }
-    setSaving(false)
-  }
-
-  return (
-    <div className="space-y-3">
-      <div>
-        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Cliente</Label>
-        <div className="glass-panel rounded-xl px-3 py-2 text-sm">{client.name}</div>
-      </div>
-      <div>
-        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Asunto</Label>
-        <Select value={matterId} onValueChange={(v) => setMatterId(v ?? "")}>
-          <SelectTrigger className="rounded-xl bg-white/5 border-white/10 h-9 text-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {client.matters.map((m) => (
-              <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <div>
-        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 block">Tiempo</Label>
-        <div className="flex items-center gap-2 glass-panel rounded-xl px-3 py-2">
-          <Clock className="h-4 w-4 text-muted-foreground" />
-          <Input
-            value={duration}
-            onChange={(e) => setDuration(e.target.value)}
-            className="border-0 bg-transparent p-0 h-auto text-sm focus-visible:ring-0"
-          />
-        </div>
-      </div>
-      <Button
-        onClick={handleLog}
-        disabled={saving}
-        className="w-full rounded-xl bg-primary hover:bg-primary/90 cursor-pointer"
-      >
-        {saving ? "Registrando..." : "Registrar Horas"}
-      </Button>
-    </div>
-  )
-}
-
 // ─── ADD MATTER SECTION ──────────────────────────────────
 
 function AddMatterSection({
   clientId,
+  isFeeClient,
   onRefresh,
 }: {
   clientId: string
+  isFeeClient: boolean
   onRefresh: () => void
 }) {
   const supabase = createClient()
   const [open, setOpen] = useState(false)
   const [name, setName] = useState("")
   const [desc, setDesc] = useState("")
-  const [type, setType] = useState<BillingType>("hourly")
-  const [cap, setCap] = useState("")
+  const [type, setType] = useState<BillingType>(isFeeClient ? "fee" : "hourly")
   const [rate, setRate] = useState("")
   const [fee, setFee] = useState("")
   const [hours, setHours] = useState("")
@@ -840,17 +870,14 @@ function AddMatterSection({
       description: desc.trim() || null,
       is_default: false,
       billing_type: type,
-      allocated_hours: hours ? parseFloat(hours) : null,
     }
-
-    if (type === "fee" && cap) insertData.hour_cap = Math.round(parseFloat(cap) * 60)
     if (type === "hourly" && rate) insertData.hourly_rate = parseFloat(rate)
     if (type === "project" && fee) insertData.fixed_fee = parseFloat(fee)
 
     const { data: newMatter, error } = await supabase.from("matters").insert(insertData).select().single()
-
     if (error) { toast.error("Error: " + error.message); return }
 
+    // Optional: hours already worked (only if the user types a value)
     if (hours && parseFloat(hours) > 0 && newMatter) {
       const durationMinutes = Math.round(parseFloat(hours) * 60)
       const { data: { user } } = await supabase.auth.getUser()
@@ -873,7 +900,7 @@ function AddMatterSection({
     }
 
     toast.success("Asunto creado")
-    setName(""); setDesc(""); setCap(""); setRate(""); setFee(""); setHours(""); setType("hourly")
+    setName(""); setDesc(""); setRate(""); setFee(""); setHours(""); setType(isFeeClient ? "fee" : "hourly")
     setOpen(false)
     onRefresh()
   }
@@ -895,19 +922,19 @@ function AddMatterSection({
       <p className="text-sm font-semibold">Nuevo asunto</p>
       <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Nombre" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" autoFocus />
       <Textarea value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Descripción (opcional)" className="rounded-xl bg-white/5 border-white/10 text-xs resize-none" rows={2} />
-      <Select value={type} onValueChange={(v) => setType((v ?? "hourly") as BillingType)}>
+      <Select value={type} onValueChange={(v) => setType((v ?? "fee") as BillingType)}>
         <SelectTrigger className="rounded-xl bg-white/5 border-white/10 h-8 text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="fee">Paquete / Fee mensual</SelectItem>
+          <SelectItem value="fee">Fee mensual / Paquete (consume cap)</SelectItem>
           <SelectItem value="hourly">Horas postpago</SelectItem>
-          <SelectItem value="project">Proyecto concreto</SelectItem>
+          <SelectItem value="project">Proyecto / Trabajo concreto</SelectItem>
         </SelectContent>
       </Select>
-      {type === "fee" && <Input type="number" value={cap} onChange={(e) => setCap(e.target.value)} placeholder="Cap horas (ej: 42)" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />}
       {type === "hourly" && <Input type="number" value={rate} onChange={(e) => setRate(e.target.value)} placeholder="Valor hora COP" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />}
       {type === "project" && <Input type="number" value={fee} onChange={(e) => setFee(e.target.value)} placeholder="Valor total COP" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />}
+      {type === "fee" && <p className="text-[9px] text-muted-foreground">Las horas de fee consumen el cap compartido del cliente.</p>}
       <Input type="number" step="0.5" value={hours} onChange={(e) => setHours(e.target.value)} placeholder="Horas ya trabajadas (opcional)" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />
       <div className="flex gap-2">
         <Button size="sm" onClick={handleAdd} className="flex-1 rounded-xl text-xs h-8 cursor-pointer"><Check className="h-3 w-3 mr-1" />Crear</Button>
@@ -928,7 +955,7 @@ function InvoiceModal({
   clientName: string
   onClose: () => void
 }) {
-  const bt = matter.billing_type || "hourly"
+  const bt = matter.billing_type || "fee"
   const hoursWorked = matter.consumedMinutes / 60
   const hourlyRate = matter.hourly_rate || 0
   const fixedFee = matter.fixed_fee || 0
@@ -956,11 +983,10 @@ function InvoiceModal({
     if (!valorFacturar || !concepto) { toast.error("Completa valor y concepto"); return }
     setSending(true)
 
-    const webhookUrl = process.env.NEXT_PUBLIC_INVOICE_WEBHOOK_URL
     const invoiceData = {
       cliente: clientName,
       consecutivo: consecutivo || "Pendiente",
-      valorTotal: `${formatCOP(parseInt(valorTotal))} más IVA`,
+      valorTotal: `${formatCOP(parseInt(valorTotal || "0"))} más IVA`,
       valorFacturar: `${formatCOP(parseInt(valorFacturar))} más IVA`,
       porcentaje: `${porcentaje}%`,
       concepto,
@@ -970,31 +996,30 @@ function InvoiceModal({
       hourlyRate,
     }
 
-    if (webhookUrl) {
-      try {
-        const res = await fetch(webhookUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(invoiceData),
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        toast.success("Factura enviada a auxiliar@quarta.co", {
-          description: `${clientName} — ${formatCOP(parseInt(valorFacturar))} más IVA`,
-          duration: 8000,
-        })
-      } catch (err: any) {
-        toast.error("Error: " + err.message)
-        setSending(false)
-        return
+    try {
+      // POST a nuestro API route (mismo origen → sin CORS); el server reenvía a Make.
+      const res = await fetch("/api/invoice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(invoiceData),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || `HTTP ${res.status}`)
       }
-    } else {
+      toast.success("Factura enviada a auxiliar@quarta.co", {
+        description: `${clientName} — ${formatCOP(parseInt(valorFacturar))} más IVA`,
+        duration: 8000,
+      })
+      setSending(false)
+      onClose()
+    } catch (err: any) {
+      // Fallback secundario: copiar al portapapeles si el envío falla
       const text = `Solicitud de facturación – ${clientName}\n\nCliente: ${clientName}\nConsecutivo: ${consecutivo || "Pendiente"}\nValor total: ${formatCOP(parseInt(valorTotal || "0"))} más IVA\nValor a facturar: ${formatCOP(parseInt(valorFacturar))} más IVA\n% a facturar: ${porcentaje}%\nConcepto: ${concepto}\nDescripción: ${descripcion}`
-      await navigator.clipboard.writeText(text)
-      toast.success("Datos copiados al portapapeles", { duration: 8000 })
+      try { await navigator.clipboard.writeText(text) } catch {}
+      toast.error("No se pudo enviar (" + (err?.message || "error") + "). Datos copiados al portapapeles como respaldo.", { duration: 9000 })
+      setSending(false)
     }
-
-    setSending(false)
-    onClose()
   }
 
   return (
