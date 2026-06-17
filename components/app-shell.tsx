@@ -148,7 +148,7 @@ export function AppShell({ user, children }: AppShellProps) {
     .toUpperCase()
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-screen overflow-hidden gradient-main">
       {/* Sidebar */}
       <aside
         className={cn(
