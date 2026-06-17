@@ -358,48 +358,106 @@ export default function ClientsPage() {
       {/* ─── Column 3: Billing Metrics & Quick Log ──────── */}
       <div className="w-80 shrink-0 flex flex-col glass-panel rounded-3xl overflow-hidden">
         {selectedClient ? (
-          <div className="p-5 space-y-6 overflow-y-auto">
-            <h3 className="text-base font-semibold">Billing Metrics & Quick Log</h3>
+          <div className="p-5 space-y-5 overflow-y-auto flex-1">
+            <h3 className="text-base font-semibold">Conteo de Horas</h3>
 
-            {/* Total Hours */}
-            <div>
+            {/* ── Fee / Paquete ── */}
+            {feeMatters.length > 0 && (
+              <div className="glass-panel rounded-2xl p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-blue-400" />
+                  <p className="text-xs font-semibold text-blue-300">Fee Mensual / Paquete</p>
+                </div>
+                <div className="flex items-end justify-between">
+                  <div>
+                    <p className="text-2xl font-bold tabular-nums text-blue-300">{formatDuration(feeConsumed)}</p>
+                    <p className="text-[10px] text-muted-foreground">registradas</p>
+                  </div>
+                  {feeCap > 0 && (
+                    <div className="text-right">
+                      <p className="text-sm font-semibold tabular-nums">{formatDuration(feeCap)}</p>
+                      <p className="text-[10px] text-muted-foreground">cap máximo</p>
+                    </div>
+                  )}
+                </div>
+                {feeCap > 0 && (() => {
+                  const pct = Math.round((feeConsumed / feeCap) * 100)
+                  return (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[10px] text-muted-foreground">
+                        <span>Consumo</span>
+                        <span className={pct >= 100 ? "text-red-400 font-semibold" : pct >= 80 ? "text-amber-400" : ""}>{pct}%</span>
+                      </div>
+                      <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            pct >= 100 ? "bg-red-400" : pct >= 80 ? "bg-amber-400" : "bg-blue-400"
+                          }`}
+                          style={{ width: `${Math.min(pct, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
+
+            {/* ── Proyecto / Trabajo Concreto ── */}
+            {projectMatters.length > 0 && (
+              <div className="glass-panel rounded-2xl p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+                  <p className="text-xs font-semibold text-amber-300">Proyecto / Trabajo Concreto</p>
+                </div>
+                <p className="text-2xl font-bold tabular-nums text-amber-300">{formatDuration(projectConsumed)}</p>
+                <p className="text-[10px] text-muted-foreground">horas registradas — conteo independiente</p>
+              </div>
+            )}
+
+            {/* ── Horas Postpago ── */}
+            {hourlyMatters.length > 0 && (() => {
+              const avgRate = hourlyMatters.reduce((s, m) => s + (m.hourly_rate || 0), 0) / hourlyMatters.length
+              const totalCOP = hourlyMatters.reduce((s, m) => s + (m.consumedMinutes / 60) * (m.hourly_rate || 0), 0)
+              return (
+                <div className="glass-panel rounded-2xl p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                    <p className="text-xs font-semibold text-emerald-300">Horas Postpago</p>
+                  </div>
+                  <p className="text-2xl font-bold tabular-nums text-emerald-300">{formatDuration(hourlyConsumed)}</p>
+                  {avgRate > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground">
+                        {(hourlyConsumed / 60).toFixed(1)}h × ${new Intl.NumberFormat("es-CO").format(Math.round(avgRate))}/h
+                      </p>
+                      <div className="flex items-baseline gap-1">
+                        <DollarSign className="h-3 w-3 text-emerald-400" />
+                        <p className="text-lg font-bold tabular-nums text-emerald-300">
+                          {new Intl.NumberFormat("es-CO").format(Math.round(totalCOP))}
+                        </p>
+                        <span className="text-[10px] text-muted-foreground">más IVA</span>
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[10px] text-muted-foreground">conteo independiente</p>
+                </div>
+              )
+            })()}
+
+            {/* ── TOTAL CLIENTE ── */}
+            <div className="border-t border-white/10 pt-4">
               <div className="flex items-center justify-between">
-                <p className="text-sm text-muted-foreground">Total Hours</p>
+                <p className="text-sm font-semibold">Total Horas Cliente</p>
                 <p className="text-2xl font-bold tabular-nums">{formatDuration(selectedClient.totalMinutes)}</p>
               </div>
               <p className="text-[10px] text-muted-foreground mt-0.5">
-                Real-time: {formatDuration(selectedClient.totalMinutes)} stats
+                {feeMatters.length > 0 ? formatDuration(feeConsumed) + " fee" : ""}
+                {feeMatters.length > 0 && projectMatters.length > 0 ? " + " : ""}
+                {projectMatters.length > 0 ? formatDuration(projectConsumed) + " proyecto" : ""}
+                {(feeMatters.length > 0 || projectMatters.length > 0) && hourlyMatters.length > 0 ? " + " : ""}
+                {hourlyMatters.length > 0 ? formatDuration(hourlyConsumed) + " postpago" : ""}
               </p>
             </div>
-
-            {/* Per-type breakdown */}
-            {feeMatters.length > 0 && (
-              <MetricRow
-                label="Budget Used"
-                value={formatDuration(feeConsumed)}
-                type="fee"
-                consumed={feeConsumed}
-                cap={feeCap}
-              />
-            )}
-            {hourlyMatters.length > 0 && (
-              <MetricRow
-                label="Horas Postpago"
-                value={formatDuration(hourlyConsumed)}
-                type="hourly"
-                consumed={hourlyConsumed}
-                cap={0}
-              />
-            )}
-            {projectMatters.length > 0 && (
-              <MetricRow
-                label="Proyectos"
-                value={formatDuration(projectConsumed)}
-                type="project"
-                consumed={projectConsumed}
-                cap={0}
-              />
-            )}
 
             {/* Quick Log */}
             <div className="pt-2 border-t border-white/5">
