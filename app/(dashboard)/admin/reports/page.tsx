@@ -46,18 +46,27 @@ export default function ReportsPage() {
   }
 
   async function fetchEntries() {
-    const { data: entries } = await supabase
-      .from("time_entries")
-      .select(`
-        *,
-        user:users(full_name),
-        client:clients(name),
-        matter:matters(name, billing_type, hour_cap, hourly_rate, fixed_fee)
-      `)
-      .gte("entry_date", dateFrom)
-      .lte("entry_date", dateTo)
-      .order("entry_date")
-    return entries || []
+    const { data, error } = await supabase.rpc("report_time_entries", {
+      p_from: dateFrom,
+      p_to: dateTo,
+    })
+    if (error) {
+      toast.error("Error: " + error.message)
+      return []
+    }
+    // Map flat RPC rows to the nested shape the report builders expect
+    return (data || []).map((r: any) => ({
+      ...r,
+      user: { full_name: r.user_name },
+      client: { name: r.client_name },
+      matter: {
+        name: r.matter_name,
+        billing_type: r.billing_type,
+        hour_cap: r.hour_cap,
+        hourly_rate: r.hourly_rate,
+        fixed_fee: r.fixed_fee,
+      },
+    }))
   }
 
   async function generateExcel() {
