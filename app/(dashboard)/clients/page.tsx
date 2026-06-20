@@ -20,7 +20,7 @@ import { startOfMonthBogota, todayBogota } from "@/lib/utils/date"
 import { toast } from "sonner"
 import {
   Plus, Building2, FolderOpen, Clock, Search, Check, X, Trash2,
-  DollarSign, Send, Receipt, AlertTriangle, Pencil, Lock,
+  DollarSign, Send, Receipt, AlertTriangle, Pencil, Lock, UserPlus,
 } from "lucide-react"
 import type { Client, Matter, BillingType } from "@/lib/types"
 import { BILLING_TYPE_SHORT } from "@/lib/types"
@@ -80,6 +80,10 @@ export default function ClientsPage() {
   const [editClientNit, setEditClientNit] = useState("")
   const [editClientCap, setEditClientCap] = useState("")
 
+  const [shareOpen, setShareOpen] = useState(false)
+  const [attorneys, setAttorneys] = useState<{ id: string; full_name: string }[]>([])
+  const [shareUserId, setShareUserId] = useState("")
+
   const [invoiceMatter, setInvoiceMatter] = useState<MatterWithHours | null>(null)
 
   const isSuperAdmin = userRole === "super_admin"
@@ -117,6 +121,26 @@ export default function ClientsPage() {
     toast.success("Cliente actualizado")
     setEditClientOpen(false)
     loadClients()
+  }
+
+  async function openShare() {
+    setShareUserId("")
+    const { data } = await supabase.rpc("list_attorneys")
+    setAttorneys((data || []).filter((a: any) => a.id !== userId))
+    setShareOpen(true)
+  }
+
+  async function handleShare() {
+    if (!selectedClient || !shareUserId) { toast.error("Elige un abogado"); return }
+    const { error } = await supabase.from("user_client_assignments").insert({
+      user_id: shareUserId,
+      client_id: selectedClient.id,
+      is_active: true,
+    })
+    if (error) { toast.error("Error: " + error.message); return }
+    const name = attorneys.find((a) => a.id === shareUserId)?.full_name || "abogado"
+    toast.success(`Cliente compartido con ${name}`)
+    setShareOpen(false)
   }
 
   useEffect(() => {
@@ -468,6 +492,17 @@ export default function ClientsPage() {
                   </p>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
+                  {!selectedClient.is_firm_client && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-primary cursor-pointer"
+                      title="Compartir con otro abogado"
+                      onClick={openShare}
+                    >
+                      <UserPlus className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                   {canEditClient(selectedClient) && (
                     <Button
                       variant="ghost"
@@ -512,6 +547,30 @@ export default function ClientsPage() {
                     <p className="text-[10px] text-muted-foreground mt-1">Compartido por todos los asuntos de fee. Se reinicia cada mes o al agotarse.</p>
                   </div>
                   <Button onClick={handleUpdateClient} className="w-full rounded-xl cursor-pointer">Guardar cambios</Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+              <DialogContent className="sm:max-w-md glass-panel border-glass-border rounded-2xl">
+                <DialogHeader>
+                  <DialogTitle>Compartir cliente</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 pt-2">
+                  <p className="text-xs text-muted-foreground">
+                    El abogado que elijas podrá registrar horas y asuntos de <strong>{selectedClient.name}</strong>.
+                  </p>
+                  <Select value={shareUserId} onValueChange={(v) => setShareUserId(v ?? "")}>
+                    <SelectTrigger className="rounded-xl bg-white/5 border-white/10">
+                      <SelectValue placeholder="Elige un abogado" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {attorneys.map((a) => (
+                        <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button onClick={handleShare} disabled={!shareUserId} className="w-full rounded-xl cursor-pointer">Compartir</Button>
                 </div>
               </DialogContent>
             </Dialog>
@@ -711,6 +770,8 @@ function EditableMatterCard({
   const [editHours, setEditHours] = useState("")
   const [editRate, setEditRate] = useState(matter.hourly_rate?.toString() || "")
   const [editFee, setEditFee] = useState(matter.fixed_fee?.toString() || "")
+  const [editBillable, setEditBillable] = useState(matter.is_billable ?? true)
+  const [editDate, setEditDate] = useState(todayBogota())
   const [saving, setSaving] = useState(false)
 
   const bt = matter.billing_type || "fee"
@@ -723,6 +784,8 @@ function EditableMatterCard({
     setEditHours((matter.myMinutes / 60).toFixed(2))
     setEditRate(matter.hourly_rate?.toString() || "")
     setEditFee(matter.fixed_fee?.toString() || "")
+    setEditBillable(matter.is_billable ?? true)
+    setEditDate(todayBogota())
     setEditing(true)
   }
 
@@ -733,6 +796,7 @@ function EditableMatterCard({
       name: editName.trim() || matter.name,
       description: editDesc.trim() || null,
       billing_type: editType,
+      is_billable: editBillable,
       hourly_rate: editType === "hourly" && editRate ? parseFloat(editRate) : null,
       fixed_fee: editType === "project" && editFee ? parseFloat(editFee) : null,
     }
@@ -754,10 +818,10 @@ function EditableMatterCard({
           user_id: user.id,
           client_id: clientId,
           matter_id: matter.id,
-          entry_date: todayBogota(),
+          entry_date: editDate || todayBogota(),
           duration_minutes: diff,
           description: `Ajuste de horas — ${editName}`,
-          is_billable: true,
+          is_billable: editBillable,
           source: "manual",
           billing_status: "draft",
           created_by: user.id,
@@ -830,6 +894,14 @@ function EditableMatterCard({
               Tu aporte actual: {(matter.myMinutes / 60).toFixed(2)}h — cambia para ajustar
             </p>
           </div>
+          <div>
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Fecha del ajuste</Label>
+            <Input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={editBillable} onChange={(e) => setEditBillable(e.target.checked)} className="accent-primary cursor-pointer" />
+            <span className="text-xs">Facturable</span>
+          </label>
           {editType === "hourly" && (
             <div>
               <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Valor hora COP</Label>
@@ -879,6 +951,11 @@ function EditableMatterCard({
             <Badge className={`text-[9px] px-1.5 py-0 border ${colors.badge}`}>
               {BILLING_TYPE_SHORT[bt as BillingType] || "Fee"}
             </Badge>
+            {matter.is_billable === false && (
+              <Badge className="text-[9px] px-1.5 py-0 border bg-white/5 text-muted-foreground border-white/10">
+                No facturable
+              </Badge>
+            )}
             <button
               onClick={startEdit}
               className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
@@ -956,6 +1033,8 @@ function AddMatterSection({
   const [rate, setRate] = useState("")
   const [fee, setFee] = useState("")
   const [hours, setHours] = useState("")
+  const [billable, setBillable] = useState(true)
+  const [date, setDate] = useState(todayBogota())
 
   async function handleAdd() {
     if (!name.trim()) { toast.error("Nombre requerido"); return }
@@ -966,6 +1045,7 @@ function AddMatterSection({
       description: desc.trim() || null,
       is_default: false,
       billing_type: type,
+      is_billable: billable,
     }
     if (type === "hourly" && rate) insertData.hourly_rate = parseFloat(rate)
     if (type === "project" && fee) insertData.fixed_fee = parseFloat(fee)
@@ -982,10 +1062,10 @@ function AddMatterSection({
           user_id: user.id,
           client_id: clientId,
           matter_id: newMatter.id,
-          entry_date: todayBogota(),
+          entry_date: date || todayBogota(),
           duration_minutes: durationMinutes,
           description: `${name.trim()}${desc.trim() ? " — " + desc.trim() : ""}`,
-          is_billable: true,
+          is_billable: billable,
           source: "manual",
           billing_status: "draft",
           created_by: user.id,
@@ -996,7 +1076,7 @@ function AddMatterSection({
     }
 
     toast.success("Asunto creado")
-    setName(""); setDesc(""); setRate(""); setFee(""); setHours(""); setType(isFeeClient ? "fee" : "hourly")
+    setName(""); setDesc(""); setRate(""); setFee(""); setHours(""); setBillable(true); setDate(todayBogota()); setType(isFeeClient ? "fee" : "hourly")
     setOpen(false)
     onRefresh()
   }
@@ -1031,6 +1111,14 @@ function AddMatterSection({
       {type === "hourly" && <Input type="number" value={rate} onChange={(e) => setRate(e.target.value)} placeholder="Valor hora COP" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />}
       {type === "project" && <Input type="number" value={fee} onChange={(e) => setFee(e.target.value)} placeholder="Valor total COP" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />}
       {type === "fee" && <p className="text-[9px] text-muted-foreground">Las horas de fee consumen el cap compartido del cliente.</p>}
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" checked={billable} onChange={(e) => setBillable(e.target.checked)} className="accent-primary cursor-pointer" />
+        <span className="text-xs">Facturable</span>
+      </label>
+      <div>
+        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Fecha de las horas</Label>
+        <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
+      </div>
       <Input type="number" step="0.5" value={hours} onChange={(e) => setHours(e.target.value)} placeholder="Horas ya trabajadas (opcional)" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />
       <div className="flex gap-2">
         <Button size="sm" onClick={handleAdd} className="flex-1 rounded-xl text-xs h-8 cursor-pointer"><Check className="h-3 w-3 mr-1" />Crear</Button>
@@ -1068,6 +1156,7 @@ function InvoiceModal({
   const [descripcion, setDescripcion] = useState(
     bt === "hourly" ? `${hoursWorked.toFixed(1)} horas de ${matter.name}` : matter.name
   )
+  const [firmante, setFirmante] = useState("")
   const [sending, setSending] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
 
@@ -1077,6 +1166,7 @@ function InvoiceModal({
 
   async function handleSendInvoice() {
     if (!valorFacturar || !concepto) { toast.error("Completa valor y concepto"); return }
+    if (!firmante.trim()) { toast.error("Indica quién firma la solicitud"); return }
     setSending(true)
 
     const invoiceData = {
@@ -1087,6 +1177,7 @@ function InvoiceModal({
       porcentaje: `${porcentaje}%`,
       concepto,
       descripcion,
+      firmante: firmante.trim(),
       matterType: bt,
       hoursWorked,
       hourlyRate,
@@ -1111,7 +1202,7 @@ function InvoiceModal({
       onClose()
     } catch (err: any) {
       // Fallback secundario: copiar al portapapeles si el envío falla
-      const text = `Solicitud de facturación – ${clientName}\n\nCliente: ${clientName}\nConsecutivo: ${consecutivo || "Pendiente"}\nValor total: ${formatCOP(parseInt(valorTotal || "0"))} más IVA\nValor a facturar: ${formatCOP(parseInt(valorFacturar))} más IVA\n% a facturar: ${porcentaje}%\nConcepto: ${concepto}\nDescripción: ${descripcion}`
+      const text = `Solicitud de facturación – ${clientName}\n\nCliente: ${clientName}\nConsecutivo: ${consecutivo || "Pendiente"}\nValor total: ${formatCOP(parseInt(valorTotal || "0"))} más IVA\nValor a facturar: ${formatCOP(parseInt(valorFacturar))} más IVA\n% a facturar: ${porcentaje}%\nConcepto: ${concepto}\nDescripción: ${descripcion}\n\nSaludos,\n${firmante.trim()}`
       try { await navigator.clipboard.writeText(text) } catch {}
       toast.error("No se pudo enviar (" + (err?.message || "error") + "). Datos copiados al portapapeles como respaldo.", { duration: 9000 })
       setSending(false)
@@ -1148,6 +1239,7 @@ function InvoiceModal({
           </div>
           <div><Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Concepto</Label><Input value={concepto} onChange={(e) => setConcepto(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" /></div>
           <div><Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Descripción</Label><Textarea value={descripcion} onChange={(e) => setDescripcion(e.target.value)} className="rounded-xl bg-white/5 border-white/10 text-xs resize-none mt-1" rows={2} /></div>
+          <div><Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Firma (quién solicita)</Label><Input value={firmante} onChange={(e) => setFirmante(e.target.value)} placeholder="Tu nombre — va al pie del correo" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" /></div>
 
           <button className="text-[11px] text-primary underline cursor-pointer" onClick={() => setShowPreview(!showPreview)}>
             {showPreview ? "Ocultar vista previa" : "Ver vista previa"}
@@ -1178,6 +1270,7 @@ function InvoiceModal({
                   ))}
                 </tbody>
               </table>
+              <p className="mt-2">Saludos,<br /><strong>{firmante || "—"}</strong></p>
             </div>
           )}
 

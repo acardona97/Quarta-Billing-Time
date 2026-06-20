@@ -82,8 +82,11 @@ export function QuickEntryModal({
         clientDefaults: clientRates,
       })
       setRate(resolved)
+      // Hereda facturable del asunto (el usuario puede cambiarlo)
+      const m = matters.find((mm) => mm.id === matterId)
+      if (m && (m as any).is_billable != null) setIsBillable((m as any).is_billable)
     }
-  }, [matterId, matterRates, clientRates])
+  }, [matterId, matterRates, clientRates, matters])
 
   async function loadClients() {
     const { data } = await supabase

@@ -110,6 +110,7 @@ export interface Matter {
   fixed_fee: number | null
   allocated_hours: number | null   // horas destinadas a este asunto (todos los tipos)
   hourly_rate: number | null       // valor hora COP (pospago)
+  is_billable: boolean             // facturable o no (independiente de la modalidad)
   is_default: boolean
   is_active: boolean
   created_at: string
