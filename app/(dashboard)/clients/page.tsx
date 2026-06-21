@@ -319,12 +319,14 @@ export default function ClientsPage() {
   )
 
   // Per-type aggregates for selected client (shared totals)
-  const feeMatters = selectedClient?.matters.filter((m) => (m.billing_type || "fee") === "fee") || []
-  const hourlyMatters = selectedClient?.matters.filter((m) => m.billing_type === "hourly") || []
-  const projectMatters = selectedClient?.matters.filter((m) => m.billing_type === "project") || []
+  const feeMatters = selectedClient?.matters.filter((m) => (m.billing_type || "fee") === "fee" && m.is_billable !== false) || []
+  const hourlyMatters = selectedClient?.matters.filter((m) => m.billing_type === "hourly" && m.is_billable !== false) || []
+  const projectMatters = selectedClient?.matters.filter((m) => m.billing_type === "project" && m.is_billable !== false) || []
+  const nonBillableMatters = selectedClient?.matters.filter((m) => m.is_billable === false) || []
   const feeConsumed = feeMatters.reduce((s, m) => s + m.consumedMinutes, 0)
   const hourlyConsumed = hourlyMatters.reduce((s, m) => s + m.consumedMinutes, 0)
   const projectConsumed = projectMatters.reduce((s, m) => s + m.consumedMinutes, 0)
+  const nonBillableConsumed = nonBillableMatters.reduce((s, m) => s + m.consumedMinutes, 0)
   const feeCap = feeCapStatus(feeConsumed, selectedClient?.monthly_hour_cap || null)
 
   return (
@@ -707,6 +709,20 @@ export default function ClientsPage() {
                 </div>
               )
             })()}
+
+            {/* No Facturables */}
+            {nonBillableMatters.length > 0 && (
+              <div className="glass-panel rounded-2xl p-3 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-slate-400" />
+                  <p className="text-xs font-semibold text-slate-300">No Facturables</p>
+                </div>
+                <p className="text-2xl font-bold tabular-nums text-slate-300">{formatDuration(nonBillableConsumed)}</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {nonBillableMatters.length} asunto{nonBillableMatters.length > 1 ? "s" : ""} · no se factura
+                </p>
+              </div>
+            )}
 
             {/* TOTAL */}
             <div className="border-t border-white/10 pt-4">
