@@ -1185,6 +1185,22 @@ function InvoiceModal({
     if (!firmante.trim()) { toast.error("Indica quién firma la solicitud"); return }
     setSending(true)
 
+    const firmanteNombre = firmante.trim()
+    const asunto = `Solicitud de facturación – ${clientName}`
+    const cuerpo_html = `<p>Hola Juli,</p>
+<p>Espero que estés muy bien. Me ayudas porfa con una factura para <strong>${clientName}</strong>. Cobro del <strong>${porcentaje}%</strong> del siguiente ítem:</p>
+<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px;">
+  <tr><td style="width:220px;"><strong>Cliente</strong></td><td>${clientName}</td></tr>
+  <tr><td><strong>Consecutivo de propuesta</strong></td><td>${consecutivo || "Pendiente"}</td></tr>
+  <tr><td><strong>Valor total del servicio</strong></td><td>${formatCOP(parseInt(valorTotal || "0"))} más IVA</td></tr>
+  <tr><td><strong>Valor a facturar</strong></td><td>${formatCOP(parseInt(valorFacturar))} más IVA</td></tr>
+  <tr><td><strong>% a facturar</strong></td><td>${porcentaje}%</td></tr>
+  <tr><td><strong>Concepto</strong></td><td>${concepto}</td></tr>
+  <tr><td><strong>Descripción</strong></td><td>${descripcion}</td></tr>
+</table>
+<p>Saludos,<br><strong>${firmanteNombre}</strong></p>`
+    const cuerpo_texto = `Hola Juli,\n\nEspero que estés muy bien. Me ayudas porfa con una factura para ${clientName}. Cobro del ${porcentaje}% del siguiente ítem:\n\nCliente: ${clientName}\nConsecutivo: ${consecutivo || "Pendiente"}\nValor total: ${formatCOP(parseInt(valorTotal || "0"))} más IVA\nValor a facturar: ${formatCOP(parseInt(valorFacturar))} más IVA\n% a facturar: ${porcentaje}%\nConcepto: ${concepto}\nDescripción: ${descripcion}\n\nSaludos,\n${firmanteNombre}`
+
     const invoiceData = {
       cliente: clientName,
       consecutivo: consecutivo || "Pendiente",
@@ -1193,10 +1209,14 @@ function InvoiceModal({
       porcentaje: `${porcentaje}%`,
       concepto,
       descripcion,
-      firmante: firmante.trim(),
+      firmante: firmanteNombre,
       matterType: bt,
       hoursWorked,
       hourlyRate,
+      // Pre-built email fields — Make usa estas directamente
+      asunto,
+      cuerpo_html,
+      cuerpo_texto,
     }
 
     try {
