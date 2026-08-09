@@ -386,9 +386,12 @@ export default function EntriesPage() {
                         placeholder="Descripción"
                       />
                     ) : (
-                      <span className="text-muted-foreground inline-flex items-center gap-1">
+                      <span className="text-muted-foreground inline-flex items-center gap-1.5">
                         {(entry as any).shared_task_id && (
-                          <Users className="h-3 w-3 text-blue-400 shrink-0" aria-label="Tarea compartida" />
+                          <Badge variant="outline" className="text-[9px] px-1 py-0 gap-0.5 shrink-0 border-blue-400/40 text-blue-400">
+                            <Users className="h-2.5 w-2.5" />
+                            Compartida
+                          </Badge>
                         )}
                         {entry.description || "—"}
                       </span>

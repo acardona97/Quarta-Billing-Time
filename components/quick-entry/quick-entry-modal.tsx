@@ -158,49 +158,56 @@ export function QuickEntryModal({
 
     setLoading(true)
 
-    // Shared task opt-in: create the shared_tasks row first, then one
-    // time_entries row per participant (creator + collaborators), each
-    // with their own duration/cap/billing accounting untouched.
-    let sharedTaskId: string | null = null
+    // Shared task opt-in: SECURITY DEFINER RPC inserts one time_entries row
+    // per participant AND grants each collaborator standing access to this
+    // specific matter — a plain multi-row insert would fail RLS (entries
+    // require user_id = auth.uid()) for every row but the creator's own.
     if (isShared && collaboratorIds.length > 0) {
-      const { data: task, error: taskError } = await supabase
-        .from("shared_tasks")
-        .insert({
-          client_id: clientId,
-          matter_id: matterId,
-          title: description.trim(),
-          created_by: userId,
-        })
-        .select("id")
-        .single()
+      const { error: rpcError } = await supabase.rpc("create_shared_task", {
+        p_client_id: clientId,
+        p_matter_id: matterId,
+        p_title: description.trim(),
+        p_entry_date: entryDate,
+        p_duration_minutes: durationMinutes,
+        p_description: description || null,
+        p_category: category || null,
+        p_is_billable: isBillable,
+        p_source: prefillData?.source || "manual",
+        p_applied_rate: rate,
+        p_participant_ids: [userId, ...collaboratorIds],
+      })
 
-      if (taskError || !task) {
-        setLoading(false)
-        toast.error("Error al crear tarea compartida: " + (taskError?.message || ""))
+      setLoading(false)
+
+      if (rpcError) {
+        toast.error("Error al registrar tarea compartida: " + rpcError.message)
         return
       }
-      sharedTaskId = task.id
+
+      toast.success("Tarea compartida registrada", {
+        description: `${durationMinutes} min × ${collaboratorIds.length + 1} abogados — ${clients.find((c) => c.id === clientId)?.name}`,
+      })
+
+      window.dispatchEvent(new CustomEvent("time-entry-created"))
+      resetForm()
+      onOpenChange(false)
+      return
     }
 
-    const participantIds = sharedTaskId ? [userId, ...collaboratorIds] : [userId]
-
-    const { error } = await supabase.from("time_entries").insert(
-      participantIds.map((uid) => ({
-        user_id: uid,
-        client_id: clientId,
-        matter_id: matterId,
-        entry_date: entryDate,
-        duration_minutes: durationMinutes,
-        description: description || null,
-        category: category || null,
-        is_billable: isBillable,
-        source: prefillData?.source || "manual",
-        applied_rate: rate,
-        billing_status: "draft",
-        created_by: userId,
-        shared_task_id: sharedTaskId,
-      }))
-    )
+    const { error } = await supabase.from("time_entries").insert({
+      user_id: userId,
+      client_id: clientId,
+      matter_id: matterId,
+      entry_date: entryDate,
+      duration_minutes: durationMinutes,
+      description: description || null,
+      category: category || null,
+      is_billable: isBillable,
+      source: prefillData?.source || "manual",
+      applied_rate: rate,
+      billing_status: "draft",
+      created_by: userId,
+    })
 
     setLoading(false)
 
@@ -209,14 +216,9 @@ export function QuickEntryModal({
       return
     }
 
-    toast.success(
-      sharedTaskId ? "Tarea compartida registrada" : "Tiempo registrado",
-      {
-        description: sharedTaskId
-          ? `${durationMinutes} min × ${participantIds.length} abogados — ${clients.find((c) => c.id === clientId)?.name}`
-          : `${durationMinutes} min — ${clients.find((c) => c.id === clientId)?.name}`,
-      }
-    )
+    toast.success("Tiempo registrado", {
+      description: `${durationMinutes} min — ${clients.find((c) => c.id === clientId)?.name}`,
+    })
 
     // Notify other components (clients page, dashboard) to reload data
     window.dispatchEvent(new CustomEvent("time-entry-created"))
