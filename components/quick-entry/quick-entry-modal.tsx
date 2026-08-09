@@ -17,8 +17,13 @@ import { resolveRate } from "@/lib/utils/rate-resolver"
 import { todayBogota } from "@/lib/utils/date"
 import { formatDuration, roundToBillingIncrement } from "@/lib/utils/duration"
 import { toast } from "sonner"
-import { Loader2, Clock, Receipt } from "lucide-react"
+import { Loader2, Clock, Receipt, Users } from "lucide-react"
 import type { Client, Matter, MatterRateOverride, ClientDefaultRate } from "@/lib/types"
+
+interface Attorney {
+  id: string
+  full_name: string
+}
 
 interface QuickEntryModalProps {
   open: boolean
@@ -58,6 +63,11 @@ export function QuickEntryModal({
   const [matterRates, setMatterRates] = useState<MatterRateOverride[]>([])
   const [clientRates, setClientRates] = useState<ClientDefaultRate[]>([])
 
+  // Shared task — opt-in, off by default. Does not affect the normal flow.
+  const [isShared, setIsShared] = useState(false)
+  const [attorneys, setAttorneys] = useState<Attorney[]>([])
+  const [collaboratorIds, setCollaboratorIds] = useState<string[]>([])
+
   // Sync prefillData when modal opens
   useEffect(() => {
     if (!open) return
@@ -69,7 +79,13 @@ export function QuickEntryModal({
       if (prefillData.category) setCategory(prefillData.category)
     }
     loadClients()
+    loadAttorneys()
   }, [open, prefillData])
+
+  async function loadAttorneys() {
+    const { data } = await supabase.rpc("list_attorneys")
+    if (data) setAttorneys(data.filter((a: Attorney) => a.id !== userId))
+  }
 
   useEffect(() => {
     if (clientId) loadMatters(clientId)
@@ -142,20 +158,49 @@ export function QuickEntryModal({
 
     setLoading(true)
 
-    const { error } = await supabase.from("time_entries").insert({
-      user_id: userId,
-      client_id: clientId,
-      matter_id: matterId,
-      entry_date: entryDate,
-      duration_minutes: durationMinutes,
-      description: description || null,
-      category: category || null,
-      is_billable: isBillable,
-      source: prefillData?.source || "manual",
-      applied_rate: rate,
-      billing_status: "draft",
-      created_by: userId,
-    })
+    // Shared task opt-in: create the shared_tasks row first, then one
+    // time_entries row per participant (creator + collaborators), each
+    // with their own duration/cap/billing accounting untouched.
+    let sharedTaskId: string | null = null
+    if (isShared && collaboratorIds.length > 0) {
+      const { data: task, error: taskError } = await supabase
+        .from("shared_tasks")
+        .insert({
+          client_id: clientId,
+          matter_id: matterId,
+          title: description.trim(),
+          created_by: userId,
+        })
+        .select("id")
+        .single()
+
+      if (taskError || !task) {
+        setLoading(false)
+        toast.error("Error al crear tarea compartida: " + (taskError?.message || ""))
+        return
+      }
+      sharedTaskId = task.id
+    }
+
+    const participantIds = sharedTaskId ? [userId, ...collaboratorIds] : [userId]
+
+    const { error } = await supabase.from("time_entries").insert(
+      participantIds.map((uid) => ({
+        user_id: uid,
+        client_id: clientId,
+        matter_id: matterId,
+        entry_date: entryDate,
+        duration_minutes: durationMinutes,
+        description: description || null,
+        category: category || null,
+        is_billable: isBillable,
+        source: prefillData?.source || "manual",
+        applied_rate: rate,
+        billing_status: "draft",
+        created_by: userId,
+        shared_task_id: sharedTaskId,
+      }))
+    )
 
     setLoading(false)
 
@@ -164,16 +209,21 @@ export function QuickEntryModal({
       return
     }
 
-    toast.success("Tiempo registrado", {
-      description: `${durationMinutes} min — ${clients.find((c) => c.id === clientId)?.name}`,
-    })
+    toast.success(
+      sharedTaskId ? "Tarea compartida registrada" : "Tiempo registrado",
+      {
+        description: sharedTaskId
+          ? `${durationMinutes} min × ${participantIds.length} abogados — ${clients.find((c) => c.id === clientId)?.name}`
+          : `${durationMinutes} min — ${clients.find((c) => c.id === clientId)?.name}`,
+      }
+    )
 
     // Notify other components (clients page, dashboard) to reload data
     window.dispatchEvent(new CustomEvent("time-entry-created"))
 
     resetForm()
     onOpenChange(false)
-  }, [clientId, matterId, durationMinutes, description, category, isBillable, rate, entryDate, userId, clients, prefillData])
+  }, [clientId, matterId, durationMinutes, description, category, isBillable, rate, entryDate, userId, clients, prefillData, isShared, collaboratorIds])
 
   function resetForm() {
     setClientId(null)
@@ -184,6 +234,8 @@ export function QuickEntryModal({
     setIsBillable(true)
     setRate(null)
     setEntryDate(todayBogota())
+    setIsShared(false)
+    setCollaboratorIds([])
   }
 
   return (
@@ -327,6 +379,51 @@ export function QuickEntryModal({
               />
             </div>
           </div>
+
+          {/* Shared task — opt-in, collapsed by default */}
+          {attorneys.length > 0 && (
+            <div className="space-y-1.5 border-t border-border/50 pt-3">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
+                  <Users className="h-3.5 w-3.5" />
+                  Tarea compartida
+                </Label>
+                <Switch
+                  checked={isShared}
+                  onCheckedChange={(v) => {
+                    setIsShared(v)
+                    if (!v) setCollaboratorIds([])
+                  }}
+                />
+              </div>
+              {isShared && (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-muted-foreground">
+                    Cada colaborador registra su propia duración — selecciona quién más participó
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {attorneys.map((a) => {
+                      const selected = collaboratorIds.includes(a.id)
+                      return (
+                        <Badge
+                          key={a.id}
+                          variant={selected ? "default" : "outline"}
+                          className="cursor-pointer transition-colors hover:bg-primary/10"
+                          onClick={() =>
+                            setCollaboratorIds((prev) =>
+                              selected ? prev.filter((id) => id !== a.id) : [...prev, a.id]
+                            )
+                          }
+                        >
+                          {a.full_name}
+                        </Badge>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Submit */}
           <Button

@@ -24,7 +24,7 @@ import { formatDuration, roundToBillingIncrement } from "@/lib/utils/duration"
 import { formatDateBogota, isWithinEditWindow, todayBogota } from "@/lib/utils/date"
 import { CATEGORIES } from "@/lib/constants"
 import { toast } from "sonner"
-import { Pencil, Check, X, Filter, Calendar, Clock, AlertTriangle, Download, FileSpreadsheet } from "lucide-react"
+import { Pencil, Check, X, Filter, Calendar, Clock, AlertTriangle, Download, FileSpreadsheet, Users } from "lucide-react"
 import type { TimeEntryWithRelations } from "@/lib/types"
 import * as XLSX from "xlsx"
 
@@ -386,7 +386,12 @@ export default function EntriesPage() {
                         placeholder="Descripción"
                       />
                     ) : (
-                      <span className="text-muted-foreground">{entry.description || "—"}</span>
+                      <span className="text-muted-foreground inline-flex items-center gap-1">
+                        {(entry as any).shared_task_id && (
+                          <Users className="h-3 w-3 text-blue-400 shrink-0" aria-label="Tarea compartida" />
+                        )}
+                        {entry.description || "—"}
+                      </span>
                     )}
                   </TableCell>
 
