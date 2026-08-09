@@ -28,7 +28,9 @@ $$;
 
 -- Reports need to know which rows count for client/cap/billing totals vs
 -- which are a collaborator's personal-hours copy of a shared task.
-CREATE OR REPLACE FUNCTION report_time_entries(p_from DATE, p_to DATE)
+-- Return type is changing (new column) — Postgres requires DROP first.
+DROP FUNCTION IF EXISTS report_time_entries(DATE, DATE);
+CREATE FUNCTION report_time_entries(p_from DATE, p_to DATE)
 RETURNS TABLE(
   entry_date DATE,
   user_id UUID,
@@ -65,6 +67,7 @@ LANGUAGE sql SECURITY DEFINER STABLE AS $$
     AND is_admin()
   ORDER BY te.entry_date;
 $$;
+GRANT EXECUTE ON FUNCTION report_time_entries(DATE, DATE) TO authenticated;
 
 -- create_shared_task(): first participant (the creator, per the frontend's
 -- [userId, ...collaboratorIds] ordering) is the one whose hours count
