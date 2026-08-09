@@ -26,6 +26,7 @@ interface RpcRow {
   is_billable: boolean
   hourly_rate: number | null
   applied_rate: number | null
+  counts_towards_cap: boolean
 }
 
 interface AttorneyRow {
@@ -98,9 +99,13 @@ export default function AdminDashboardPage() {
       }
       setAttorneys(Object.values(byAtty).sort((a, b) => b.total - a.total))
 
-      // Client consumption (aggregate from entries, then enrich with cap)
+      // Client consumption (aggregate from entries, then enrich with cap).
+      // Shared-task collaborator rows are excluded here (counts_towards_cap
+      // = false) so a 2h shared meeting debits the client once, not per
+      // attorney — attorney ranking above intentionally keeps every row.
       const byClient: Record<string, { name: string; billing_type: string; minutes: number }> = {}
       for (const r of all) {
+        if (r.counts_towards_cap === false) continue
         if (!byClient[r.client_id]) byClient[r.client_id] = { name: r.client_name || "—", billing_type: r.billing_type || "", minutes: 0 }
         byClient[r.client_id].minutes += r.duration_minutes
       }

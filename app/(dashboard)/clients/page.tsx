@@ -145,6 +145,9 @@ export default function ClientsPage() {
 
   useEffect(() => {
     loadClients()
+    supabase.rpc("list_attorneys").then(({ data }) => {
+      if (data) setAttorneys(data)
+    })
 
     function handleVisibility() {
       if (document.visibilityState === "visible") loadClients()
@@ -594,6 +597,8 @@ export default function ClientsPage() {
                         matter={matter}
                         clientId={selectedClient.id}
                         clientCap={selectedClient.monthly_hour_cap}
+                        attorneys={attorneys}
+                        userId={userId}
                         onInvoice={() => setInvoiceMatter(matter)}
                         onRefresh={loadClients}
                       />
@@ -769,12 +774,16 @@ function EditableMatterCard({
   matter,
   clientId,
   clientCap,
+  attorneys,
+  userId,
   onInvoice,
   onRefresh,
 }: {
   matter: MatterWithHours
   clientId: string
   clientCap: number | null
+  attorneys: { id: string; full_name: string }[]
+  userId: string
   onInvoice: () => void
   onRefresh: () => void
 }) {
@@ -789,6 +798,71 @@ function EditableMatterCard({
   const [editBillable, setEditBillable] = useState(matter.is_billable ?? true)
   const [editDate, setEditDate] = useState(todayBogota())
   const [saving, setSaving] = useState(false)
+
+  // Registrar horas — log a work session on this existing matter, optionally
+  // shared with a collaborator (each gets full personal hours; the client
+  // cap is only debited once, via counts_towards_cap on the DB side).
+  const [logOpen, setLogOpen] = useState(false)
+  const [logHours, setLogHours] = useState("")
+  const [logDesc, setLogDesc] = useState("")
+  const [logDate, setLogDate] = useState(todayBogota())
+  const [logShared, setLogShared] = useState(false)
+  const [logCollaboratorId, setLogCollaboratorId] = useState("")
+  const [logSaving, setLogSaving] = useState(false)
+  const otherAttorneys = attorneys.filter((a) => a.id !== userId)
+
+  async function handleLogHours() {
+    const mins = Math.round(parseFloat(logHours || "0") * 60)
+    if (mins <= 0) { toast.error("Indica las horas trabajadas"); return }
+    if (!logDesc.trim()) { toast.error("Descripción obligatoria"); return }
+    if (logShared && !logCollaboratorId) { toast.error("Elige con quién compartiste"); return }
+
+    setLogSaving(true)
+
+    if (logShared) {
+      const { error } = await supabase.rpc("create_shared_task", {
+        p_client_id: clientId,
+        p_matter_id: matter.id,
+        p_title: logDesc.trim(),
+        p_entry_date: logDate,
+        p_duration_minutes: mins,
+        p_description: logDesc.trim(),
+        p_category: null,
+        p_is_billable: matter.is_billable ?? true,
+        p_source: "manual",
+        p_applied_rate: matter.hourly_rate ?? null,
+        p_participant_ids: [userId, logCollaboratorId],
+      })
+      setLogSaving(false)
+      if (error) { toast.error("Error: " + error.message); return }
+      const name = otherAttorneys.find((a) => a.id === logCollaboratorId)?.full_name || "colega"
+      toast.success(`Horas registradas — compartidas con ${name}`, {
+        description: `${logHours}h cada uno · solo ${logHours}h se suman al cliente`,
+      })
+    } else {
+      const { error } = await supabase.from("time_entries").insert({
+        user_id: userId,
+        client_id: clientId,
+        matter_id: matter.id,
+        entry_date: logDate,
+        duration_minutes: mins,
+        description: logDesc.trim(),
+        is_billable: matter.is_billable ?? true,
+        source: "manual",
+        billing_status: "draft",
+        created_by: userId,
+        applied_rate: matter.hourly_rate ?? null,
+      })
+      setLogSaving(false)
+      if (error) { toast.error("Error: " + error.message); return }
+      toast.success("Horas registradas")
+    }
+
+    setLogHours(""); setLogDesc(""); setLogShared(false); setLogCollaboratorId(""); setLogDate(todayBogota())
+    setLogOpen(false)
+    window.dispatchEvent(new CustomEvent("time-entry-created"))
+    onRefresh()
+  }
 
   const bt = matter.billing_type || "fee"
   const colors = BILLING_COLORS[bt] || BILLING_COLORS.fee
@@ -993,8 +1067,81 @@ function EditableMatterCard({
             >
               <Receipt className="h-3.5 w-3.5" />
             </button>
+            <button
+              onClick={() => setLogOpen((v) => !v)}
+              className={`p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer ${logOpen ? "text-primary" : "text-muted-foreground hover:text-primary"}`}
+              title="Registrar horas"
+            >
+              <Clock className="h-3.5 w-3.5" />
+            </button>
           </div>
         </div>
+
+        {logOpen && (
+          <div className="mt-3 p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                type="number"
+                step="0.25"
+                value={logHours}
+                onChange={(e) => setLogHours(e.target.value)}
+                placeholder="Horas"
+                className="rounded-lg bg-white/5 border-white/10 h-8 text-xs"
+              />
+              <Input
+                type="date"
+                value={logDate}
+                onChange={(e) => setLogDate(e.target.value)}
+                className="rounded-lg bg-white/5 border-white/10 h-8 text-xs"
+              />
+            </div>
+            <Textarea
+              value={logDesc}
+              onChange={(e) => setLogDesc(e.target.value)}
+              placeholder="Descripción del trabajo"
+              className="rounded-lg bg-white/5 border-white/10 text-xs resize-none"
+              rows={2}
+            />
+            {otherAttorneys.length > 0 && (
+              <div className="space-y-1.5">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={logShared}
+                    onChange={(e) => { setLogShared(e.target.checked); if (!e.target.checked) setLogCollaboratorId("") }}
+                    className="accent-primary cursor-pointer"
+                  />
+                  <span className="text-xs">Compartido con...</span>
+                </label>
+                {logShared && (
+                  <>
+                    <Select value={logCollaboratorId} onValueChange={(v) => setLogCollaboratorId(v ?? "")}>
+                      <SelectTrigger className="rounded-lg bg-white/5 border-white/10 h-8 text-xs">
+                        <SelectValue placeholder="Elige el abogado" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {otherAttorneys.map((a) => (
+                          <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[9px] text-muted-foreground">
+                      Cada uno registra {logHours || "0"}h propias — al cliente solo se le suman {logHours || "0"}h una vez
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <Button size="sm" onClick={handleLogHours} disabled={logSaving} className="flex-1 rounded-lg text-xs h-8 cursor-pointer">
+                <Check className="h-3 w-3 mr-1" />{logSaving ? "Guardando..." : "Registrar"}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setLogOpen(false)} className="rounded-lg text-xs h-8 cursor-pointer">
+                <X className="h-3 w-3" />
+              </Button>
+            </div>
+          </div>
+        )}
 
         {matter.consumedMinutes > 0 && (
           <div className="flex items-center gap-2 mt-2">

@@ -25,6 +25,7 @@ export interface ReportEntry {
   duration_minutes: number
   is_billable?: boolean
   applied_rate?: number | null
+  counts_towards_cap?: boolean
 }
 
 function durText(min: number) {

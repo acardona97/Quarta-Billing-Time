@@ -65,6 +65,7 @@ export default function ReportsPage() {
       duration_minutes: r.duration_minutes,
       is_billable: r.is_billable,
       applied_rate: r.applied_rate,
+      counts_towards_cap: r.counts_towards_cap,
     }))
   }
 
@@ -93,7 +94,14 @@ export default function ReportsPage() {
           filename = `horas-por-abogado_${dateFrom}_${dateTo}`
           break
         case "hours_by_client":
-          wb = groupedWorkbook({ title: "Horas por Cliente", period, groupBy: "client", entries })
+          // Client-facing totals: exclude the collaborator's copy of a
+          // shared task so a 2h shared meeting counts once, not twice.
+          wb = groupedWorkbook({
+            title: "Horas por Cliente",
+            period,
+            groupBy: "client",
+            entries: entries.filter((e) => e.counts_towards_cap !== false),
+          })
           filename = `horas-por-cliente_${dateFrom}_${dateTo}`
           break
         case "attorney_client_matrix":
@@ -105,7 +113,7 @@ export default function ReportsPage() {
             title: "Consumo de Paquete (Fee)",
             period,
             groupBy: "client",
-            entries: entries.filter((e) => (e.matter?.billing_type || "") === "fee"),
+            entries: entries.filter((e) => (e.matter?.billing_type || "") === "fee" && e.counts_towards_cap !== false),
           })
           filename = `consumo-paquete_${dateFrom}_${dateTo}`
           break
@@ -114,7 +122,7 @@ export default function ReportsPage() {
             title: "Pre-factura (facturables)",
             period,
             groupBy: "client",
-            entries: entries.filter((e) => e.is_billable !== false),
+            entries: entries.filter((e) => e.is_billable !== false && e.counts_towards_cap !== false),
             withValue: true,
           })
           filename = `pre-factura_${dateFrom}_${dateTo}`
@@ -124,7 +132,7 @@ export default function ReportsPage() {
             title: "Seguimiento de Facturación",
             period,
             groupBy: "attorney",
-            entries,
+            entries: entries.filter((e) => e.counts_towards_cap !== false),
             withValue: true,
           })
           filename = `seguimiento-facturacion_${dateFrom}_${dateTo}`
