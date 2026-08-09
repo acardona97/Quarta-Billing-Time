@@ -16,11 +16,12 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 import { formatDuration } from "@/lib/utils/duration"
-import { startOfMonthBogota, todayBogota } from "@/lib/utils/date"
+import { todayBogota } from "@/lib/utils/date"
 import { toast } from "sonner"
 import {
   Plus, Building2, FolderOpen, Clock, Search, Check, X, Trash2,
   DollarSign, Send, Receipt, AlertTriangle, Pencil, Lock, UserPlus,
+  ChevronLeft, ChevronRight,
 } from "lucide-react"
 import type { Client, Matter, BillingType } from "@/lib/types"
 import { BILLING_TYPE_SHORT } from "@/lib/types"
@@ -28,14 +29,34 @@ import { BILLING_TYPE_SHORT } from "@/lib/types"
 // ─── TYPES ───────────────────────────────────────────────
 
 interface MatterWithHours extends Matter {
-  consumedMinutes: number   // total compartido (todos los abogados, este mes)
+  consumedMinutes: number   // total compartido (todos los abogados, mes visto)
   myMinutes: number         // aporte propio del abogado (editable)
+  allTimeMinutes: number    // total histórico del asunto (todos, sin filtro de mes)
 }
 
 interface ClientWithData extends Client {
   matters: MatterWithHours[]
-  totalMinutes: number      // total compartido de todos sus asuntos
+  totalMinutes: number      // total compartido de todos sus asuntos (mes visto)
   myTotalMinutes: number    // aporte propio
+  allTimeMinutes: number    // total histórico del cliente
+}
+
+// Mes actual como YYYY-MM-01 en Bogotá — ancla del selector de mes.
+function monthKey(ymd: string) {
+  return ymd.slice(0, 7) + "-01"
+}
+
+function shiftMonth(monthAnchor: string, delta: number) {
+  const [y, m] = monthAnchor.split("-").map(Number)
+  const d = new Date(Date.UTC(y, m - 1 + delta, 1))
+  return d.toISOString().slice(0, 10)
+}
+
+function monthLabel(monthAnchor: string) {
+  const [y, m] = monthAnchor.split("-").map(Number)
+  const names = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                 "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+  return `${names[m - 1]} ${y}`
 }
 
 // ─── COLORS PER BILLING TYPE ─────────────────────────────
@@ -85,6 +106,11 @@ export default function ClientsPage() {
   const [shareUserId, setShareUserId] = useState("")
 
   const [invoiceMatter, setInvoiceMatter] = useState<MatterWithHours | null>(null)
+
+  // Mes visible en la columna de conteo — arranca en el mes actual, así la
+  // vista por defecto es idéntica a como estaba antes.
+  const [viewMonth, setViewMonth] = useState(() => monthKey(todayBogota()))
+  const isCurrentMonth = viewMonth === monthKey(todayBogota())
 
   const isSuperAdmin = userRole === "super_admin"
 
@@ -159,7 +185,7 @@ export default function ClientsPage() {
       document.removeEventListener("visibilitychange", handleVisibility)
       window.removeEventListener("time-entry-created", loadClients)
     }
-  }, [])
+  }, [viewMonth])
 
   async function loadClients() {
     setLoading(true)
@@ -200,20 +226,30 @@ export default function ClientsPage() {
     const { data: clientsData } = await query
 
     if (clientsData) {
-      // Shared firm-wide consumption per matter (current calendar month)
-      const { data: sharedRows } = await supabase.rpc("matter_consumption_current_month")
+      // Shared firm-wide consumption per matter, for the month being viewed
+      const { data: sharedRows } = await supabase.rpc("matter_consumption_for_month", {
+        p_month: viewMonth,
+      })
       const sharedByMatter = (sharedRows || []).reduce((acc: Record<string, number>, r: any) => {
         acc[r.matter_id] = Number(r.total_minutes) || 0
         return acc
       }, {})
 
-      // Own contribution per matter (this month) — for the editable hours field
-      const monthStart = startOfMonthBogota()
+      // All-time consumption per matter — so past months are never invisible
+      const { data: allRows } = await supabase.rpc("matter_consumption_all_time")
+      const allByMatter = (allRows || []).reduce((acc: Record<string, number>, r: any) => {
+        acc[r.matter_id] = Number(r.total_minutes) || 0
+        return acc
+      }, {})
+
+      // Own contribution per matter (month being viewed) — editable hours field
+      const monthEnd = shiftMonth(viewMonth, 1)
       const { data: mine } = await supabase
         .from("time_entries")
         .select("matter_id, duration_minutes")
         .eq("user_id", authUser.id)
-        .gte("entry_date", monthStart)
+        .gte("entry_date", viewMonth)
+        .lt("entry_date", monthEnd)
 
       const myByMatter = (mine || []).reduce((acc: Record<string, number>, h: any) => {
         acc[h.matter_id] = (acc[h.matter_id] || 0) + h.duration_minutes
@@ -227,10 +263,12 @@ export default function ClientsPage() {
             ...m,
             consumedMinutes: sharedByMatter[m.id] || 0,
             myMinutes: myByMatter[m.id] || 0,
+            allTimeMinutes: allByMatter[m.id] || 0,
           }))
         const totalMinutes = matters.reduce((s, m) => s + m.consumedMinutes, 0)
         const myTotalMinutes = matters.reduce((s, m) => s + m.myMinutes, 0)
-        return { ...c, matters, totalMinutes, myTotalMinutes }
+        const allTimeMinutes = matters.reduce((s, m) => s + m.allTimeMinutes, 0)
+        return { ...c, matters, totalMinutes, myTotalMinutes, allTimeMinutes }
       })
 
       // Firm clients first, then alphabetical
@@ -610,6 +648,8 @@ export default function ClientsPage() {
               <AddMatterSection
                 clientId={selectedClient.id}
                 isFeeClient={!!selectedClient.monthly_hour_cap}
+                attorneys={attorneys}
+                userId={userId}
                 onRefresh={loadClients}
               />
             </div>
@@ -629,7 +669,35 @@ export default function ClientsPage() {
       <div className="w-80 shrink-0 flex flex-col glass-panel rounded-3xl overflow-hidden">
         {selectedClient ? (
           <div className="p-5 space-y-5 overflow-y-auto flex-1">
-            <h3 className="text-base font-semibold">Conteo de Horas</h3>
+            <div>
+              <h3 className="text-base font-semibold">Conteo de Horas</h3>
+              <div className="flex items-center justify-between mt-2 rounded-xl bg-white/5 border border-white/10 px-2 py-1">
+                <button
+                  onClick={() => setViewMonth((m) => shiftMonth(m, -1))}
+                  className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                  title="Mes anterior"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <span className="text-xs font-medium">{monthLabel(viewMonth)}</span>
+                <button
+                  onClick={() => setViewMonth((m) => shiftMonth(m, 1))}
+                  disabled={isCurrentMonth}
+                  className="p-1 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-25 disabled:cursor-default"
+                  title="Mes siguiente"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
+              {!isCurrentMonth && (
+                <button
+                  onClick={() => setViewMonth(monthKey(todayBogota()))}
+                  className="text-[10px] text-primary underline mt-1 cursor-pointer"
+                >
+                  Volver al mes actual
+                </button>
+              )}
+            </div>
 
             {/* Fee / Paquete — shared cap */}
             {feeMatters.length > 0 && (
@@ -736,13 +804,22 @@ export default function ClientsPage() {
                 <p className="text-2xl font-bold tabular-nums">{formatDuration(selectedClient.totalMinutes)}</p>
               </div>
               <p className="text-[10px] text-muted-foreground mt-0.5">
-                Suma de las modalidades · este mes
+                Suma de las modalidades · {monthLabel(viewMonth)}
               </p>
               {selectedClient.myTotalMinutes > 0 && (
                 <p className="text-[10px] text-muted-foreground mt-0.5">
                   Tu aporte: {formatDuration(selectedClient.myTotalMinutes)}
                 </p>
               )}
+              <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/10">
+                <p className="text-[11px] text-muted-foreground">Total histórico</p>
+                <p className="text-sm font-semibold tabular-nums text-muted-foreground">
+                  {formatDuration(selectedClient.allTimeMinutes)}
+                </p>
+              </div>
+              <p className="text-[9px] text-muted-foreground/70 mt-0.5">
+                Todas las horas del cliente desde siempre
+              </p>
             </div>
           </div>
         ) : (
@@ -814,8 +891,11 @@ function EditableMatterCard({
   async function handleLogHours() {
     const mins = Math.round(parseFloat(logHours || "0") * 60)
     if (mins <= 0) { toast.error("Indica las horas trabajadas"); return }
-    if (!logDesc.trim()) { toast.error("Descripción obligatoria"); return }
     if (logShared && !logCollaboratorId) { toast.error("Elige con quién compartiste"); return }
+
+    // La descripción es opcional: si no la escriben, se usa el nombre del
+    // asunto — pedirla de nuevo sería duplicar lo que ya nombraron.
+    const desc = logDesc.trim() || matter.name
 
     setLogSaving(true)
 
@@ -823,10 +903,10 @@ function EditableMatterCard({
       const { error } = await supabase.rpc("create_shared_task", {
         p_client_id: clientId,
         p_matter_id: matter.id,
-        p_title: logDesc.trim(),
+        p_title: desc,
         p_entry_date: logDate,
         p_duration_minutes: mins,
-        p_description: logDesc.trim(),
+        p_description: desc,
         p_category: null,
         p_is_billable: matter.is_billable ?? true,
         p_source: "manual",
@@ -846,7 +926,7 @@ function EditableMatterCard({
         matter_id: matter.id,
         entry_date: logDate,
         duration_minutes: mins,
-        description: logDesc.trim(),
+        description: desc,
         is_billable: matter.is_billable ?? true,
         source: "manual",
         billing_status: "draft",
@@ -1105,7 +1185,7 @@ function EditableMatterCard({
             <Textarea
               value={logDesc}
               onChange={(e) => setLogDesc(e.target.value)}
-              placeholder="Descripción del trabajo"
+              placeholder={`Descripción (opcional — por defecto: ${matter.name})`}
               className="rounded-lg bg-white/5 border-white/10 text-xs resize-none"
               rows={2}
             />
@@ -1195,10 +1275,14 @@ function EditableMatterCard({
 function AddMatterSection({
   clientId,
   isFeeClient,
+  attorneys,
+  userId,
   onRefresh,
 }: {
   clientId: string
   isFeeClient: boolean
+  attorneys: { id: string; full_name: string }[]
+  userId: string
   onRefresh: () => void
 }) {
   const supabase = createClient()
@@ -1211,9 +1295,17 @@ function AddMatterSection({
   const [hours, setHours] = useState("")
   const [billable, setBillable] = useState(true)
   const [date, setDate] = useState(todayBogota())
+  const [shared, setShared] = useState(false)
+  const [collaboratorId, setCollaboratorId] = useState("")
+  const otherAttorneys = attorneys.filter((a) => a.id !== userId)
 
   async function handleAdd() {
     if (!name.trim()) { toast.error("Nombre requerido"); return }
+    if (shared && !collaboratorId) { toast.error("Elige con quién compartes el asunto"); return }
+    if (shared && !(hours && parseFloat(hours) > 0)) {
+      toast.error("Indica las horas para compartirlas con el otro abogado")
+      return
+    }
 
     const insertData: Record<string, unknown> = {
       client_id: clientId,
@@ -1232,27 +1324,55 @@ function AddMatterSection({
     // Optional: hours already worked (only if the user types a value)
     if (hours && parseFloat(hours) > 0 && newMatter) {
       const durationMinutes = Math.round(parseFloat(hours) * 60)
-      const { data: { user } } = await supabase.auth.getUser()
-      if (user) {
+      const entryDesc = `${name.trim()}${desc.trim() ? " — " + desc.trim() : ""}`
+
+      if (shared) {
+        // One step: matter + hours + collaborator. Each attorney gets their
+        // own full hours; the client is only debited once.
+        const { error: rpcError } = await supabase.rpc("create_shared_task", {
+          p_client_id: clientId,
+          p_matter_id: newMatter.id,
+          p_title: entryDesc,
+          p_entry_date: date || todayBogota(),
+          p_duration_minutes: durationMinutes,
+          p_description: entryDesc,
+          p_category: null,
+          p_is_billable: billable,
+          p_source: "manual",
+          p_applied_rate: type === "hourly" && rate ? parseFloat(rate) : null,
+          p_participant_ids: [userId, collaboratorId],
+        })
+        if (rpcError) { toast.error("Error al compartir: " + rpcError.message); return }
+      } else {
         await supabase.from("time_entries").insert({
-          user_id: user.id,
+          user_id: userId,
           client_id: clientId,
           matter_id: newMatter.id,
           entry_date: date || todayBogota(),
           duration_minutes: durationMinutes,
-          description: `${name.trim()}${desc.trim() ? " — " + desc.trim() : ""}`,
+          description: entryDesc,
           is_billable: billable,
           source: "manual",
           billing_status: "draft",
-          created_by: user.id,
+          created_by: userId,
           applied_rate: type === "hourly" && rate ? parseFloat(rate) : null,
         })
-        window.dispatchEvent(new CustomEvent("time-entry-created"))
       }
+      window.dispatchEvent(new CustomEvent("time-entry-created"))
     }
 
-    toast.success("Asunto creado")
-    setName(""); setDesc(""); setRate(""); setFee(""); setHours(""); setBillable(true); setDate(todayBogota()); setType(isFeeClient ? "fee" : "hourly")
+    if (shared) {
+      const who = otherAttorneys.find((a) => a.id === collaboratorId)?.full_name || "colega"
+      toast.success(`Asunto creado y compartido con ${who}`, {
+        description: `${hours}h para cada uno · al cliente se le suman ${hours}h una vez`,
+      })
+    } else {
+      toast.success("Asunto creado")
+    }
+
+    setName(""); setDesc(""); setRate(""); setFee(""); setHours(""); setBillable(true)
+    setDate(todayBogota()); setType(isFeeClient ? "fee" : "hourly")
+    setShared(false); setCollaboratorId("")
     setOpen(false)
     onRefresh()
   }
@@ -1296,6 +1416,38 @@ function AddMatterSection({
         <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-xl bg-white/5 border-white/10 h-8 text-xs mt-1" />
       </div>
       <Input type="number" step="0.5" value={hours} onChange={(e) => setHours(e.target.value)} placeholder="Horas ya trabajadas (opcional)" className="rounded-xl bg-white/5 border-white/10 h-8 text-xs" />
+
+      {otherAttorneys.length > 0 && (
+        <div className="space-y-1.5 pt-2 border-t border-white/10">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={shared}
+              onChange={(e) => { setShared(e.target.checked); if (!e.target.checked) setCollaboratorId("") }}
+              className="accent-primary cursor-pointer"
+            />
+            <span className="text-xs font-medium">Trabajé estas horas junto a otro abogado</span>
+          </label>
+          {shared && (
+            <>
+              <Select value={collaboratorId} onValueChange={(v) => setCollaboratorId(v ?? "")}>
+                <SelectTrigger className="rounded-xl bg-white/5 border-white/10 h-8 text-xs">
+                  <SelectValue placeholder="Compartido con..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {otherAttorneys.map((a) => (
+                    <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-blue-300 bg-blue-500/10 rounded-lg px-2 py-1.5">
+                Cada uno registra <strong>{hours || "0"}h</strong> propias · al cliente se le suman <strong>{hours || "0"}h</strong> una sola vez
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="flex gap-2">
         <Button size="sm" onClick={handleAdd} className="flex-1 rounded-xl text-xs h-8 cursor-pointer"><Check className="h-3 w-3 mr-1" />Crear</Button>
         <Button size="sm" variant="ghost" onClick={() => setOpen(false)} className="rounded-xl text-xs h-8 cursor-pointer"><X className="h-3 w-3" /></Button>
