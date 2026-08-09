@@ -103,7 +103,7 @@ export default function ClientsPage() {
 
   const [shareOpen, setShareOpen] = useState(false)
   const [attorneys, setAttorneys] = useState<{ id: string; full_name: string }[]>([])
-  const [shareUserId, setShareUserId] = useState("")
+  const [shareUserIds, setShareUserIds] = useState<string[]>([])
 
   const [invoiceMatter, setInvoiceMatter] = useState<MatterWithHours | null>(null)
 
@@ -150,22 +150,29 @@ export default function ClientsPage() {
   }
 
   async function openShare() {
-    setShareUserId("")
+    setShareUserIds([])
     const { data } = await supabase.rpc("list_attorneys")
-    setAttorneys((data || []).filter((a: any) => a.id !== userId))
+    if (data) setAttorneys(data)
     setShareOpen(true)
   }
 
   async function handleShare() {
-    if (!selectedClient || !shareUserId) { toast.error("Elige un abogado"); return }
-    const { error } = await supabase.from("user_client_assignments").insert({
-      user_id: shareUserId,
-      client_id: selectedClient.id,
-      is_active: true,
-    })
+    if (!selectedClient || shareUserIds.length === 0) {
+      toast.error("Elige al menos un abogado")
+      return
+    }
+    const { error } = await supabase.from("user_client_assignments").insert(
+      shareUserIds.map((uid) => ({
+        user_id: uid,
+        client_id: selectedClient.id,
+        is_active: true,
+      }))
+    )
     if (error) { toast.error("Error: " + error.message); return }
-    const name = attorneys.find((a) => a.id === shareUserId)?.full_name || "abogado"
-    toast.success(`Cliente compartido con ${name}`)
+    const names = shareUserIds
+      .map((id) => attorneys.find((a) => a.id === id)?.full_name || "abogado")
+      .join(", ")
+    toast.success(`Cliente compartido con ${names}`)
     setShareOpen(false)
   }
 
@@ -601,19 +608,35 @@ export default function ClientsPage() {
                 </DialogHeader>
                 <div className="space-y-4 pt-2">
                   <p className="text-xs text-muted-foreground">
-                    El abogado que elijas podrá registrar horas y asuntos de <strong>{selectedClient.name}</strong>.
+                    Los abogados que elijas podrán registrar horas y asuntos de <strong>{selectedClient.name}</strong>. Puedes marcar varios.
                   </p>
-                  <Select value={shareUserId} onValueChange={(v) => setShareUserId(v ?? "")}>
-                    <SelectTrigger className="rounded-xl bg-white/5 border-white/10">
-                      <SelectValue placeholder="Elige un abogado" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {attorneys.map((a) => (
-                        <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button onClick={handleShare} disabled={!shareUserId} className="w-full rounded-xl cursor-pointer">Compartir</Button>
+                  <div className="max-h-60 overflow-y-auto space-y-1 rounded-xl bg-white/5 border border-white/10 p-2">
+                    {attorneys.filter((a) => a.id !== userId).map((a) => {
+                      const checked = shareUserIds.includes(a.id)
+                      return (
+                        <label
+                          key={a.id}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-white/5 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() =>
+                              setShareUserIds((prev) =>
+                                checked ? prev.filter((id) => id !== a.id) : [...prev, a.id]
+                              )
+                            }
+                            className="accent-primary cursor-pointer"
+                          />
+                          <span className="text-xs">{a.full_name}</span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                  {shareUserIds.length > 0 && (
+                    <p className="text-[10px] text-primary">{shareUserIds.length} abogado(s) seleccionado(s)</p>
+                  )}
+                  <Button onClick={handleShare} disabled={shareUserIds.length === 0} className="w-full rounded-xl cursor-pointer">Compartir</Button>
                 </div>
               </DialogContent>
             </Dialog>
@@ -884,14 +907,14 @@ function EditableMatterCard({
   const [logDesc, setLogDesc] = useState("")
   const [logDate, setLogDate] = useState(todayBogota())
   const [logShared, setLogShared] = useState(false)
-  const [logCollaboratorId, setLogCollaboratorId] = useState("")
+  const [logCollaboratorIds, setLogCollaboratorIds] = useState<string[]>([])
   const [logSaving, setLogSaving] = useState(false)
   const otherAttorneys = attorneys.filter((a) => a.id !== userId)
 
   async function handleLogHours() {
     const mins = Math.round(parseFloat(logHours || "0") * 60)
     if (mins <= 0) { toast.error("Indica las horas trabajadas"); return }
-    if (logShared && !logCollaboratorId) { toast.error("Elige con quién compartiste"); return }
+    if (logShared && logCollaboratorIds.length === 0) { toast.error("Elige con quién compartiste"); return }
 
     // La descripción es opcional: si no la escriben, se usa el nombre del
     // asunto — pedirla de nuevo sería duplicar lo que ya nombraron.
@@ -911,13 +934,15 @@ function EditableMatterCard({
         p_is_billable: matter.is_billable ?? true,
         p_source: "manual",
         p_applied_rate: matter.hourly_rate ?? null,
-        p_participant_ids: [userId, logCollaboratorId],
+        p_participant_ids: [userId, ...logCollaboratorIds],
       })
       setLogSaving(false)
       if (error) { toast.error("Error: " + error.message); return }
-      const name = otherAttorneys.find((a) => a.id === logCollaboratorId)?.full_name || "colega"
-      toast.success(`Horas registradas — compartidas con ${name}`, {
-        description: `${logHours}h cada uno · solo ${logHours}h se suman al cliente`,
+      const names = logCollaboratorIds
+        .map((id) => otherAttorneys.find((a) => a.id === id)?.full_name || "colega")
+        .join(", ")
+      toast.success(`Horas registradas — compartidas con ${names}`, {
+        description: `${logHours}h para cada uno · al cliente solo se le suman ${logHours}h`,
       })
     } else {
       const { error } = await supabase.from("time_entries").insert({
@@ -938,7 +963,7 @@ function EditableMatterCard({
       toast.success("Horas registradas")
     }
 
-    setLogHours(""); setLogDesc(""); setLogShared(false); setLogCollaboratorId(""); setLogDate(todayBogota())
+    setLogHours(""); setLogDesc(""); setLogShared(false); setLogCollaboratorIds([]); setLogDate(todayBogota())
     setLogOpen(false)
     window.dispatchEvent(new CustomEvent("time-entry-created"))
     onRefresh()
@@ -1200,25 +1225,36 @@ function EditableMatterCard({
                     <input
                       type="checkbox"
                       checked={logShared}
-                      onChange={(e) => { setLogShared(e.target.checked); if (!e.target.checked) setLogCollaboratorId("") }}
+                      onChange={(e) => { setLogShared(e.target.checked); if (!e.target.checked) setLogCollaboratorIds([]) }}
                       className="accent-primary cursor-pointer"
                     />
-                    <span className="text-xs font-medium">Trabajé estas horas junto a otro abogado</span>
+                    <span className="text-xs font-medium">Trabajé estas horas junto a otros abogados</span>
                   </label>
                   {logShared && (
                     <>
-                      <Select value={logCollaboratorId} onValueChange={(v) => setLogCollaboratorId(v ?? "")}>
-                        <SelectTrigger className="rounded-lg bg-white/5 border-white/10 h-8 text-xs">
-                          <SelectValue placeholder="Compartido con..." />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {otherAttorneys.map((a) => (
-                            <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      <p className="text-[10px] text-muted-foreground">Compartido con (marca todos los que participaron):</p>
+                      <div className="max-h-32 overflow-y-auto space-y-0.5 rounded-lg bg-white/5 border border-white/10 p-1.5">
+                        {otherAttorneys.map((a) => {
+                          const checked = logCollaboratorIds.includes(a.id)
+                          return (
+                            <label key={a.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-white/5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() =>
+                                  setLogCollaboratorIds((prev) =>
+                                    checked ? prev.filter((id) => id !== a.id) : [...prev, a.id]
+                                  )
+                                }
+                                className="accent-primary cursor-pointer"
+                              />
+                              <span className="text-xs">{a.full_name}</span>
+                            </label>
+                          )
+                        })}
+                      </div>
                       <p className="text-[10px] text-blue-300 bg-blue-500/10 rounded-lg px-2 py-1.5">
-                        Cada uno registra <strong>{logHours || "0"}h</strong> propias · al cliente se le suman <strong>{logHours || "0"}h</strong> una sola vez
+                        {logCollaboratorIds.length + 1} abogados registran <strong>{logHours || "0"}h</strong> cada uno · al cliente se le suman <strong>{logHours || "0"}h</strong> una sola vez
                       </p>
                     </>
                   )}
@@ -1296,12 +1332,12 @@ function AddMatterSection({
   const [billable, setBillable] = useState(true)
   const [date, setDate] = useState(todayBogota())
   const [shared, setShared] = useState(false)
-  const [collaboratorId, setCollaboratorId] = useState("")
+  const [collaboratorIds, setCollaboratorIds] = useState<string[]>([])
   const otherAttorneys = attorneys.filter((a) => a.id !== userId)
 
   async function handleAdd() {
     if (!name.trim()) { toast.error("Nombre requerido"); return }
-    if (shared && !collaboratorId) { toast.error("Elige con quién compartes el asunto"); return }
+    if (shared && collaboratorIds.length === 0) { toast.error("Elige con quién compartes el asunto"); return }
     if (shared && !(hours && parseFloat(hours) > 0)) {
       toast.error("Indica las horas para compartirlas con el otro abogado")
       return
@@ -1340,7 +1376,7 @@ function AddMatterSection({
           p_is_billable: billable,
           p_source: "manual",
           p_applied_rate: type === "hourly" && rate ? parseFloat(rate) : null,
-          p_participant_ids: [userId, collaboratorId],
+          p_participant_ids: [userId, ...collaboratorIds],
         })
         if (rpcError) { toast.error("Error al compartir: " + rpcError.message); return }
       } else {
@@ -1362,7 +1398,9 @@ function AddMatterSection({
     }
 
     if (shared) {
-      const who = otherAttorneys.find((a) => a.id === collaboratorId)?.full_name || "colega"
+      const who = collaboratorIds
+        .map((id) => otherAttorneys.find((a) => a.id === id)?.full_name || "colega")
+        .join(", ")
       toast.success(`Asunto creado y compartido con ${who}`, {
         description: `${hours}h para cada uno · al cliente se le suman ${hours}h una vez`,
       })
@@ -1372,7 +1410,7 @@ function AddMatterSection({
 
     setName(""); setDesc(""); setRate(""); setFee(""); setHours(""); setBillable(true)
     setDate(todayBogota()); setType(isFeeClient ? "fee" : "hourly")
-    setShared(false); setCollaboratorId("")
+    setShared(false); setCollaboratorIds([])
     setOpen(false)
     onRefresh()
   }
@@ -1423,25 +1461,36 @@ function AddMatterSection({
             <input
               type="checkbox"
               checked={shared}
-              onChange={(e) => { setShared(e.target.checked); if (!e.target.checked) setCollaboratorId("") }}
+              onChange={(e) => { setShared(e.target.checked); if (!e.target.checked) setCollaboratorIds([]) }}
               className="accent-primary cursor-pointer"
             />
-            <span className="text-xs font-medium">Trabajé estas horas junto a otro abogado</span>
+            <span className="text-xs font-medium">Trabajé estas horas junto a otros abogados</span>
           </label>
           {shared && (
             <>
-              <Select value={collaboratorId} onValueChange={(v) => setCollaboratorId(v ?? "")}>
-                <SelectTrigger className="rounded-xl bg-white/5 border-white/10 h-8 text-xs">
-                  <SelectValue placeholder="Compartido con..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {otherAttorneys.map((a) => (
-                    <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <p className="text-[10px] text-muted-foreground">Compartido con (marca todos los que participaron):</p>
+              <div className="max-h-32 overflow-y-auto space-y-0.5 rounded-xl bg-white/5 border border-white/10 p-1.5">
+                {otherAttorneys.map((a) => {
+                  const checked = collaboratorIds.includes(a.id)
+                  return (
+                    <label key={a.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-white/5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          setCollaboratorIds((prev) =>
+                            checked ? prev.filter((id) => id !== a.id) : [...prev, a.id]
+                          )
+                        }
+                        className="accent-primary cursor-pointer"
+                      />
+                      <span className="text-xs">{a.full_name}</span>
+                    </label>
+                  )
+                })}
+              </div>
               <p className="text-[10px] text-blue-300 bg-blue-500/10 rounded-lg px-2 py-1.5">
-                Cada uno registra <strong>{hours || "0"}h</strong> propias · al cliente se le suman <strong>{hours || "0"}h</strong> una sola vez
+                {collaboratorIds.length + 1} abogados registran <strong>{hours || "0"}h</strong> cada uno · al cliente se le suman <strong>{hours || "0"}h</strong> una sola vez
               </p>
             </>
           )}
