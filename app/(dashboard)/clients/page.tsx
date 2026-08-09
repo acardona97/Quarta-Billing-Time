@@ -1067,18 +1067,25 @@ function EditableMatterCard({
             >
               <Receipt className="h-3.5 w-3.5" />
             </button>
-            <button
-              onClick={() => setLogOpen((v) => !v)}
-              className={`p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer ${logOpen ? "text-primary" : "text-muted-foreground hover:text-primary"}`}
-              title="Registrar horas"
-            >
-              <Clock className="h-3.5 w-3.5" />
-            </button>
           </div>
         </div>
 
+        {!logOpen && (
+          <button
+            onClick={() => setLogOpen(true)}
+            className="w-full mt-3 py-2 rounded-xl border border-dashed border-white/15 text-xs text-muted-foreground hover:border-primary/40 hover:text-primary transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+          >
+            <Clock className="h-3.5 w-3.5" />
+            Registrar horas {otherAttorneys.length > 0 && "· solo o compartidas"}
+          </button>
+        )}
+
         {logOpen && (
           <div className="mt-3 p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
+            <p className="text-xs font-semibold flex items-center gap-1.5">
+              <Clock className="h-3.5 w-3.5 text-primary" />
+              Registrar horas trabajadas
+            </p>
             <div className="grid grid-cols-2 gap-2">
               <Input
                 type="number"
@@ -1102,36 +1109,42 @@ function EditableMatterCard({
               className="rounded-lg bg-white/5 border-white/10 text-xs resize-none"
               rows={2}
             />
-            {otherAttorneys.length > 0 && (
-              <div className="space-y-1.5">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={logShared}
-                    onChange={(e) => { setLogShared(e.target.checked); if (!e.target.checked) setLogCollaboratorId("") }}
-                    className="accent-primary cursor-pointer"
-                  />
-                  <span className="text-xs">Compartido con...</span>
-                </label>
-                {logShared && (
-                  <>
-                    <Select value={logCollaboratorId} onValueChange={(v) => setLogCollaboratorId(v ?? "")}>
-                      <SelectTrigger className="rounded-lg bg-white/5 border-white/10 h-8 text-xs">
-                        <SelectValue placeholder="Elige el abogado" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {otherAttorneys.map((a) => (
-                          <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-[9px] text-muted-foreground">
-                      Cada uno registra {logHours || "0"}h propias — al cliente solo se le suman {logHours || "0"}h una vez
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
+            <div className="space-y-1.5 pt-1 border-t border-white/10">
+              {otherAttorneys.length === 0 ? (
+                <p className="text-[10px] text-amber-400">
+                  No hay otros abogados disponibles para compartir
+                </p>
+              ) : (
+                <>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={logShared}
+                      onChange={(e) => { setLogShared(e.target.checked); if (!e.target.checked) setLogCollaboratorId("") }}
+                      className="accent-primary cursor-pointer"
+                    />
+                    <span className="text-xs font-medium">Trabajé estas horas junto a otro abogado</span>
+                  </label>
+                  {logShared && (
+                    <>
+                      <Select value={logCollaboratorId} onValueChange={(v) => setLogCollaboratorId(v ?? "")}>
+                        <SelectTrigger className="rounded-lg bg-white/5 border-white/10 h-8 text-xs">
+                          <SelectValue placeholder="Compartido con..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {otherAttorneys.map((a) => (
+                            <SelectItem key={a.id} value={a.id}>{a.full_name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[10px] text-blue-300 bg-blue-500/10 rounded-lg px-2 py-1.5">
+                        Cada uno registra <strong>{logHours || "0"}h</strong> propias · al cliente se le suman <strong>{logHours || "0"}h</strong> una sola vez
+                      </p>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
             <div className="flex gap-2">
               <Button size="sm" onClick={handleLogHours} disabled={logSaving} className="flex-1 rounded-lg text-xs h-8 cursor-pointer">
                 <Check className="h-3 w-3 mr-1" />{logSaving ? "Guardando..." : "Registrar"}
